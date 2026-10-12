@@ -224,7 +224,7 @@ public final class ClutterEngine: CheckupContributor, GroupScanner, @unchecked S
         let result = await withTaskCancellationHandler {
             await ClutterBackground.run { () -> (groups: [ClutterDuplicateGroup], downloads: [ClutterDownloadItem]) in
                 progress(ScanProgress(fraction: nil, message: "Looking for duplicate downloads…"))
-                let walker = ClutterWalker(paths: paths, settings: scanSettings, isPlaceholder: ClutterFileMetadata.isPlaceholder)
+                let walker = ClutterWalker(paths: paths, settings: scanSettings, isPlaceholder: { ClutterFileMetadata.isPlaceholder($0) })
                 let walked = walker.walk(locations: [paths.downloads], shouldContinue: shouldContinue)
                 let files = walked.files.filter { !settings.isIgnored(path: $0.path) && !settings.ignoredItemIDs.contains($0.path) }
                 let finder = ClutterDuplicateFinder(paths: paths, concurrency: concurrency)
@@ -316,7 +316,7 @@ struct ClutterReportBuilder {
         if board.stages.contains(.indexing) {
             board.set(.indexing, .running(nil))
             emit("Finding files…", force: true)
-            let walker = ClutterWalker(paths: paths, settings: scanSettings, isPlaceholder: ClutterFileMetadata.isPlaceholder)
+            let walker = ClutterWalker(paths: paths, settings: scanSettings, isPlaceholder: { ClutterFileMetadata.isPlaceholder($0) })
             let walked = walker.walk(locations: locations, shouldContinue: shouldContinue) { examined, current in
                 let message = "Looked at \(CountFormat.items(examined, singular: "file"))…"
                 if throttle.shouldEmit() {
@@ -417,7 +417,7 @@ struct ClutterReportBuilder {
         if tools.contains(.downloads) {
             board.set(.downloads, .running(nil))
             emit("Sorting your downloads…", force: true)
-            let walker = ClutterWalker(paths: paths, settings: scanSettings, isPlaceholder: ClutterFileMetadata.isPlaceholder)
+            let walker = ClutterWalker(paths: paths, settings: scanSettings, isPlaceholder: { ClutterFileMetadata.isPlaceholder($0) })
             let top = walker.listDownloads(shouldContinue: shouldContinue).filter { !isIgnored($0.path) }
             var metadata: [String: ClutterDownloadMetadata] = [:]
             var enriched: [ClutterFile] = []
