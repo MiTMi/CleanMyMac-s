@@ -143,13 +143,14 @@ final class ToolboxTaskModel {
         memoryBefore = monitor.hasSample ? monitor.memory.used : nil
         memoryAfter = nil
         let task = self.task
+        let report: ProgressHandler = { p in
+            Task { @MainActor [weak self] in
+                guard let self, self.phase == .running else { return }
+                self.progress = p
+            }
+        }
         Task { [weak self] in
-            let results = await engine.runTasks([task], progress: { p in
-                Task { @MainActor [weak self] in
-                    guard let self, self.phase == .running else { return }
-                    self.progress = p
-                }
-            })
+            let results = await engine.runTasks([task], progress: report)
             guard let self else { return }
             let result = results.first(where: { $0.id == task })
                 ?? PerformanceTaskRunResult(id: task, status: .failed, detail: "The task didn't run.")
@@ -305,13 +306,14 @@ final class ToolboxShredderModel {
         progress = ScanProgress(fraction: 0, message: "Overwriting…")
         let engine = self.engine
         let settings = SettingsStore.shared.settings
+        let report: ProgressHandler = { p in
+            Task { @MainActor [weak self] in
+                guard let self, self.phase == .shredding else { return }
+                self.progress = p
+            }
+        }
         task = Task { [weak self] in
-            let outcome = await engine.shred(targets, settings: settings, progress: { p in
-                Task { @MainActor [weak self] in
-                    guard let self, self.phase == .shredding else { return }
-                    self.progress = p
-                }
-            })
+            let outcome = await engine.shred(targets, settings: settings, progress: report)
             if outcome.processedCount > 0 {
                 HistoryStore.shared.record(outcome, kind: .clean)
             }

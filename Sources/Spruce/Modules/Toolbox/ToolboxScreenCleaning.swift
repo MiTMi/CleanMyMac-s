@@ -18,7 +18,7 @@ struct ToolboxScreenCleaningScreen: View {
                                IdleFeature(symbol: "keyboard", title: "Input is ignored",
                                            detail: "Typing, clicking and scrolling do nothing, so wiping the keyboard or trackpad can't trigger anything."),
                                IdleFeature(symbol: "escape", title: "Hold Esc for 2 seconds to finish",
-                                           detail: "Or press and hold \u{201C}Hold to Finish\u{201D} on screen until its ring fills."),
+                                           detail: "Or press and hold \u{201C}Done\u{201D} on screen until its ring fills."),
                                IdleFeature(symbol: "circle.lefthalf.filled", title: "Spot smudges",
                                            detail: "Switch the screen between black, white and grey to see marks in different light."),
                                IdleFeature(symbol: "timer", title: "Ends by itself",
@@ -360,7 +360,7 @@ struct ToolboxScreenCleaningOverlay: View {
     }
 }
 
-/// "Done" that must be held for 2 seconds; a ring fills while it's held.
+/// "Done" button that must be held for 2 seconds; a ring fills while it's held.
 struct ToolboxHoldToFinishButton: View {
     var ink: Color
     var progress: Double
@@ -378,8 +378,11 @@ struct ToolboxHoldToFinishButton: View {
                     .rotationEffect(.degrees(-90))
             }
             .frame(width: 16, height: 16)
-            Text("Hold to Finish")
+            Text("Done")
                 .font(.system(size: 13, weight: .semibold))
+            Text("hold 2 s")
+                .font(.system(size: 11))
+                .opacity(0.7)
         }
         .foregroundStyle(ink.opacity(0.85))
         .padding(.horizontal, 16)

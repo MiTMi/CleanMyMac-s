@@ -249,7 +249,7 @@ struct ToolboxTrashReadyView: View {
             VStack(spacing: Spacing.xxs) {
                 PrismMetricText(text: ByteFormat.string(summary.bytes), font: SpruceFont.metricXL,
                                 unitFont: .system(size: 20, weight: .medium))
-                Text("in \(CountFormat.items(summary.itemCount))\(summary.fileCount > summary.itemCount ? " · \(CountFormat.items(summary.fileCount, singular: "file")) inside" : "")")
+                Text(countLine)
                     .font(SpruceFont.headline)
                     .foregroundStyle(PrismInk(contrast).secondary)
             }
@@ -271,6 +271,14 @@ struct ToolboxTrashReadyView: View {
         }
         .frame(maxWidth: .infinity)
         .padding(.horizontal, Spacing.contentInset)
+    }
+
+    private var countLine: String {
+        var line = "in \(CountFormat.items(summary.itemCount))"
+        if summary.fileCount > summary.itemCount {
+            line += " · \(CountFormat.items(summary.fileCount, singular: "file")) inside"
+        }
+        return line
     }
 
     private var largestList: some View {
