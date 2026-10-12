@@ -23,6 +23,7 @@ public final class CleanupEngine: CheckupContributor, GroupScanner, @unchecked S
     private var requestedSections: Set<CleanupSection>?
     private var moduleReport: CleanupScanReport?
     private var checkupReport: CleanupScanReport?
+    private var liveTracker: CleanupScanTracker?
 
     /// Rules scanned at the same time (I/O bound).
     private let concurrency = 4
@@ -46,9 +47,18 @@ public final class CleanupEngine: CheckupContributor, GroupScanner, @unchecked S
         locked { checkupReport }
     }
 
+    /// Per-section progress of the running (or last) module scan, in display order.
+    /// Empty until the scan has worked out which rules to run.
+    public var scanSectionProgress: [CleanupSectionProgress] {
+        locked { liveTracker }?.sections ?? []
+    }
+
     /// Limits the next `scan(progress:)` to some sections (e.g. the Trash Bins tool).
     public func requestNextScan(sections: Set<CleanupSection>) {
-        locked { requestedSections = sections.isEmpty ? nil : sections }
+        locked {
+            requestedSections = sections.isEmpty ? nil : sections
+            liveTracker = nil
+        }
     }
 
     private func takeRequestedSections() -> Set<CleanupSection> {
@@ -121,13 +131,15 @@ public final class CleanupEngine: CheckupContributor, GroupScanner, @unchecked S
     /// total of bytes found.
     public func scan(sections: Set<CleanupSection>, purpose: CleanupScanPurpose,
                      progress: @escaping ProgressHandler) async throws -> CleanupScanReport {
+        if purpose == .module { locked { liveTracker = nil } }
         progress(ScanProgress(fraction: nil, message: "Getting ready…"))
         let settings = await MainActor.run { SettingsStore.shared.settings }
         let context = await CleanupSystemProbe.makeContext(purpose: purpose)
         try Self.checkCancellation()
         let scanner = CleanupScanner(context: context, settings: settings, isCancelled: { Task.isCancelled })
         let rules = scanner.rules(for: sections)
-        let tracker = CleanupScanTracker(total: rules.count, handler: progress)
+        let tracker = CleanupScanTracker(rules: rules, sections: sections, handler: progress)
+        if purpose == .module { locked { liveTracker = tracker } }
         let width = concurrency
 
         let results = try await withThrowingTaskGroup(of: CleanupRuleResult.self,
@@ -136,6 +148,7 @@ public final class CleanupEngine: CheckupContributor, GroupScanner, @unchecked S
             var queue = rules[...]
             for _ in 0..<width {
                 guard let rule = queue.popFirst() else { break }
+                tracker.started(rule)
                 group.addTask {
                     scanner.scan(rule: rule, onProgress: { tracker.visiting($0, title: rule.category.title) })
                 }
@@ -148,6 +161,7 @@ public final class CleanupEngine: CheckupContributor, GroupScanner, @unchecked S
                     break
                 }
                 if let rule = queue.popFirst() {
+                    tracker.started(rule)
                     group.addTask {
                         scanner.scan(rule: rule, onProgress: { tracker.visiting($0, title: rule.category.title) })
                     }
@@ -314,18 +328,29 @@ public final class CleanupEngine: CheckupContributor, GroupScanner, @unchecked S
     }
 }
 
-/// Aggregates progress from concurrently scanned rules (throttled to ~10 updates/s).
+/// Aggregates progress from concurrently scanned rules (throttled to ~10 updates/s)
+/// and keeps the per-section tally the scanning checklist reads.
 private final class CleanupScanTracker: @unchecked Sendable {
     private let lock = NSLock()
-    private let total: Int
     private let handler: ProgressHandler
-    private var finishedCount = 0
-    private var bytes: Int64 = 0
+    private var tally: CleanupScanTally
     private var lastEmit = Date.distantPast
 
-    init(total: Int, handler: @escaping ProgressHandler) {
-        self.total = total
+    init(rules: [CleanupRule], sections: Set<CleanupSection>, handler: @escaping ProgressHandler) {
+        tally = CleanupScanTally(rules: rules, sections: sections)
         self.handler = handler
+    }
+
+    var sections: [CleanupSectionProgress] {
+        lock.lock()
+        defer { lock.unlock() }
+        return tally.sections
+    }
+
+    func started(_ rule: CleanupRule) {
+        lock.lock()
+        tally.start(rule)
+        lock.unlock()
     }
 
     func visiting(_ path: String, title: String) {
@@ -336,23 +361,19 @@ private final class CleanupScanTracker: @unchecked Sendable {
             return
         }
         lastEmit = now
-        let update = ScanProgress(fraction: fraction, message: "Looking through \(title)…",
-                                  current: path.abbreviatingHome, bytesFound: bytes)
+        let update = ScanProgress(fraction: tally.fraction, message: "Looking through \(title)…",
+                                  current: path.abbreviatingHome, bytesFound: tally.bytesFound)
         lock.unlock()
         handler(update)
     }
 
     func finished(_ result: CleanupRuleResult) {
         lock.lock()
-        finishedCount += 1
-        bytes += result.totalBytes
+        tally.finish(result)
         lastEmit = Date()
-        let update = ScanProgress(fraction: fraction, message: "Checked \(result.category.title)", bytesFound: bytes)
+        let update = ScanProgress(fraction: tally.fraction, message: "Checked \(result.category.title)",
+                                  bytesFound: tally.bytesFound)
         lock.unlock()
         handler(update)
-    }
-
-    private var fraction: Double? {
-        total > 0 ? Double(finishedCount) / Double(total) : nil
     }
 }
