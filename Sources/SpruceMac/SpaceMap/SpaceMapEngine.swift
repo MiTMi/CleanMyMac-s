@@ -93,10 +93,14 @@ public final class SpaceMapEngine: @unchecked Sendable {
         }
         let result = SpaceMapScanResult(target: current, root: output.root, stats: output.stats, options: options,
                                         date: Date(), systemNode: systemNode)
+        store(result)
+        return result
+    }
+
+    private func store(_ result: SpaceMapScanResult) {
         lock.lock()
         storedResult = result
         lock.unlock()
-        return result
     }
 
     /// Rescans one folder of an existing map with the same boundary. Returns the fresh

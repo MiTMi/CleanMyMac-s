@@ -158,26 +158,31 @@ final class SpaceMapScreenModel {
         stats = SpaceMapScanStats()
         scanningTarget = target
         let engine = self.engine
-        task = Task { [weak self] in
+        // Screen models live as long as the app (one per engine), so strong captures are fine.
+        let model = self
+        let progress: SpaceMapStatsHandler = { stats in
+            Task { @MainActor in model.receive(stats) }
+        }
+        task = Task {
             do {
-                let result = try await engine.scan(target, progress: { stats in
-                    Task { @MainActor [weak self] in
-                        guard let self, self.phase == .scanning else { return }
-                        self.stats = stats
-                    }
-                })
-                guard let self, !Task.isCancelled else { return }
-                self.apply(result, recordHistory: true)
+                let result = try await engine.scan(target, progress: progress)
+                guard !Task.isCancelled else { return }
+                model.apply(result, recordHistory: true)
             } catch {
                 // A cancelled task was stopped or replaced by a newer scan; that code owns the phase.
-                guard let self, !Task.isCancelled else { return }
+                guard !Task.isCancelled else { return }
                 if (error as? SpruceError) == .cancelled {
-                    if self.phase == .scanning { self.phase = self.result == nil ? .idle : .results }
+                    if model.phase == .scanning { model.phase = model.result == nil ? .idle : .results }
                 } else {
-                    self.phase = .failed(error.localizedDescription)
+                    model.phase = .failed(error.localizedDescription)
                 }
             }
         }
+    }
+
+    private func receive(_ newStats: SpaceMapScanStats) {
+        guard phase == .scanning else { return }
+        stats = newStats
     }
 
     func cancelScan() {
@@ -373,15 +378,16 @@ final class SpaceMapScreenModel {
         removalProgress = ScanProgress(fraction: 0, message: "Moving to the Trash…")
         let engine = self.engine
         let settings = SettingsStore.shared.settings
-        task = Task { [weak self] in
-            let outcome = await engine.remove(targets, settings: settings, progress: { progress in
-                Task { @MainActor [weak self] in
-                    guard let self, self.phase == .removing else { return }
-                    self.removalProgress = progress
-                }
-            })
-            guard let self else { return }
-            self.finishRemoval(outcome, of: targets)
+        let model = self
+        let progress: ProgressHandler = { update in
+            Task { @MainActor in
+                guard model.phase == .removing else { return }
+                model.removalProgress = update
+            }
+        }
+        task = Task {
+            let outcome = await engine.remove(targets, settings: settings, progress: progress)
+            model.finishRemoval(outcome, of: targets)
         }
     }
 
@@ -436,23 +442,22 @@ final class SpaceMapScreenModel {
         let engine = self.engine
         let options = result.options
         let focusPath = focus?.path
-        Task { [weak self] in
+        let model = self
+        Task {
             do {
                 let fresh = try await engine.rescan(node, options: options)
-                guard let self else { return }
-                self.rescanning.remove(node.id)
-                guard let root = self.result?.root, node.isAttached(to: root) else { return }
+                model.rescanning.remove(node.id)
+                guard let root = model.result?.root, node.isAttached(to: root) else { return }
                 if let fresh {
                     node.replaceContents(with: fresh)
                 } else {
                     node.detach()
                 }
-                self.afterTreeEdit(previousFocusPath: focusPath, fallback: fresh == nil ? nil : node)
+                model.afterTreeEdit(previousFocusPath: focusPath, fallback: fresh == nil ? nil : node)
             } catch {
-                guard let self else { return }
-                self.rescanning.remove(node.id)
+                model.rescanning.remove(node.id)
                 if !quietly, (error as? SpruceError) != .cancelled {
-                    self.toast = "Couldn't rescan \(node.name): \(error.localizedDescription)"
+                    model.toast = "Couldn't rescan \(node.name): \(error.localizedDescription)"
                 }
             }
         }

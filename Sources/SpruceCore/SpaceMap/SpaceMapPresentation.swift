@@ -21,6 +21,11 @@ public struct SpaceMapSmallerGroup: Sendable {
 public struct SpaceMapGrouped: Sendable {
     public let visible: [SpaceMapNode]
     public let smaller: SpaceMapSmallerGroup?
+
+    public init(visible: [SpaceMapNode], smaller: SpaceMapSmallerGroup?) {
+        self.visible = visible
+        self.smaller = smaller
+    }
 }
 
 public enum SpaceMapGrouping {
