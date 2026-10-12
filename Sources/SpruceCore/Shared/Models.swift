@@ -457,8 +457,30 @@ public struct CheckupTile: Identifiable, Sendable, Equatable {
 /// `checkupRun` performs only the default-safe recommended actions from that scan.
 public protocol CheckupContributor: AnyObject {
     var module: ModuleID { get }
+    /// Reviewable items found by the last `checkupScan`. The Checkup review sheet edits
+    /// the selection; `checkupRun` acts only on selected items.
+    var checkupReview: [ScanGroup] { get set }
     func checkupScan(progress: @escaping ProgressHandler) async throws -> CheckupTile
     func checkupRun(progress: @escaping ProgressHandler) async throws -> RunOutcome
+}
+
+// MARK: - Catalog descriptors
+
+/// Describes a scan category (e.g. a Cleanup group) for settings and help screens.
+/// `CleanupCatalog.categories` (SpruceCore/Cleanup) returns these; Settings › Scanning
+/// uses them to let the user exclude categories (`SpruceSettings.excludedCleanupCategories`).
+public struct CategoryDescriptor: Identifiable, Hashable, Sendable, Codable {
+    public var id: String
+    public var title: String
+    public var detail: String
+    public var symbol: String
+
+    public init(id: String, title: String, detail: String = "", symbol: String = "folder") {
+        self.id = id
+        self.title = title
+        self.detail = detail
+        self.symbol = symbol
+    }
 }
 
 // MARK: - Errors

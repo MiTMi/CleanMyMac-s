@@ -8,6 +8,7 @@ import SpruceCore
 /// * `CheckupContributor` conformance (`checkupScan`, `checkupRun`)
 /// * `GroupScanner` conformance (`scan`, `perform`) for the module's main review list
 public final class ClutterEngine: CheckupContributor, GroupScanner {
+    public var checkupReview: [ScanGroup] = []
     public let module: ModuleID = .clutter
 
     public init() {}

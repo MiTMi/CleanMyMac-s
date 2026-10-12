@@ -61,6 +61,44 @@ public final class PrivilegedRunner: @unchecked Sendable {
         return try await runAsAdministrator(script)
     }
 
+    /// Executables that may be run as root with caller-supplied arguments.
+    /// Arguments are validated and single-quoted; no shell syntax can be injected.
+    public static let allowedExecutables: Set<String> = [
+        "/bin/launchctl", "/usr/bin/tmutil", "/usr/sbin/sfltool", "/usr/bin/profiles",
+        "/usr/bin/mdutil", "/usr/bin/killall", "/bin/kill", "/usr/sbin/purge",
+        "/usr/bin/dscacheutil", "/usr/bin/pkgutil", "/usr/bin/log",
+    ]
+
+    /// One root command invocation.
+    public struct Invocation: Sendable {
+        public var executable: String
+        public var arguments: [String]
+        public init(_ executable: String, _ arguments: [String] = []) {
+            self.executable = executable
+            self.arguments = arguments
+        }
+    }
+
+    /// Runs allowlisted executables as root, all in one administrator prompt.
+    /// Each invocation's exit status is ignored individually (`; true`) so one failure
+    /// does not prevent the rest; inspect state afterwards to confirm the effect.
+    @discardableResult
+    public func run(_ invocations: [Invocation]) async throws -> String {
+        guard !invocations.isEmpty else { return "" }
+        var parts: [String] = []
+        for inv in invocations {
+            guard Self.allowedExecutables.contains(inv.executable) else {
+                throw SpruceError.unsupported("\(inv.executable) is not allowed to run as administrator")
+            }
+            for arg in inv.arguments where arg.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7F }) {
+                throw SpruceError.unsupported("Invalid argument for \(inv.executable)")
+            }
+            let command = ([inv.executable] + inv.arguments).map(Self.shellQuote).joined(separator: " ")
+            parts.append("(\(command); true)")
+        }
+        return try await runAsAdministrator(parts.joined(separator: "; "))
+    }
+
     /// Removes root-owned paths. Every path is re-checked with `PathGuard` (permanent
     /// removal semantics) and must not be a symlink-escaped location.
     public func removePaths(_ paths: [String], guardian: PathGuard = PathGuard()) async throws {

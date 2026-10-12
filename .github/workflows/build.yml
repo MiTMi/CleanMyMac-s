@@ -6,6 +6,10 @@ on:
   pull_request:
   workflow_dispatch:
 
+defaults:
+  run:
+    shell: bash   # implies -eo pipefail, so `| tee` cannot mask a failed build
+
 concurrency:
   group: build-${{ github.ref }}
   cancel-in-progress: true
