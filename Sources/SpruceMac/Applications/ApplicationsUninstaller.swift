@@ -107,17 +107,29 @@ enum ApplicationsUninstaller {
             }
         }
 
-        // Unload the user's launch agents first so nothing respawns from the Trash.
+        // Unload launch agents and daemons first so nothing respawns from the Trash.
         let home = NSHomeDirectory()
+        var systemDaemons: [String] = []
         for item in removable {
-            guard let path = item.url?.path, path.hasSuffix(".plist"),
-                  path.hasPrefix(home + "/Library/LaunchAgents/") else { continue }
-            _ = await Shell.run("/bin/launchctl", ["bootout", "gui/\(ApplicationsMac.uid)", path], timeout: 15)
+            guard let path = item.url?.path, path.hasSuffix(".plist") else { continue }
+            if path.hasPrefix(home + "/Library/LaunchAgents/") || path.hasPrefix("/Library/LaunchAgents/") {
+                _ = await Shell.run("/bin/launchctl", ["bootout", "gui/\(ApplicationsMac.uid)", path], timeout: 15)
+            } else if path.hasPrefix("/Library/LaunchDaemons/"),
+                      !(path as NSString).lastPathComponent.lowercased().hasPrefix("com.apple.") {
+                systemDaemons.append(path)
+            }
+        }
+        if !systemDaemons.isEmpty {
+            progress?(ScanProgress(fraction: nil, message: "Stopping background helpers (administrator approval)…"))
+            let invocations = systemDaemons.map { PrivilegedRunner.Invocation("/bin/launchctl", ["bootout", "system", $0]) }
+            _ = try? await PrivilegedRunner.shared.run(invocations)
         }
 
+        // Root-owned items (pkg-installed apps, /Library helpers) go to the Trash with one
+        // administrator prompt.
         let files = removable.filter { $0.deletion != .custom }
         var outcome = await FileRemover.shared.dispose(files, module: .applications, options: [.allowAppBundles, .allowLaunchItems],
-                                                       settings: settings, escalate: false, progress: progress)
+                                                       settings: settings, escalate: true, progress: progress)
         outcome.failures = failures + outcome.failures
 
         // Dock tiles: only for apps whose bundle really left.

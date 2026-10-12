@@ -54,9 +54,10 @@ enum ApplicationsExtensionManager {
         }
         // Input methods are .app bundles; nothing else needs bundle permission.
         let needsBundles = removable.contains { $0.kind == .inputMethod }
+        // Plug-ins installed for all users (/Library) are usually root-owned: one admin prompt.
         var outcome = await FileRemover.shared.dispose(items, module: .applications,
                                                        options: needsBundles ? [.allowAppBundles] : [],
-                                                       settings: settings, progress: progress)
+                                                       settings: settings, escalate: true, progress: progress)
         let removedIDs = Set(outcome.removedItemIDs)
         if removable.contains(where: { $0.kind == .quickLook && removedIDs.contains($0.id) }) {
             _ = await Shell.run("/usr/bin/qlmanage", ["-r"], timeout: 20)
