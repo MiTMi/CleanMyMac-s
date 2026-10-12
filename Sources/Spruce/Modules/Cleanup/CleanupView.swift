@@ -49,6 +49,8 @@ final class CleanupScreenModel {
     var confirmNonSafe = false
     var confirmStartOver = false
     private(set) var isWaitingForApps = false
+    /// The section a card's Clean button applies to; nil cleans everything selected.
+    private(set) var cleanScope: CleanupSection?
     private var pendingFocus: CleanupSection?
     private var scanningSections: Set<CleanupSection> = Set(CleanupSection.allCases)
     private var scanStartedAt: Date?
@@ -97,9 +99,17 @@ final class CleanupScreenModel {
     }
 
     /// Categories macOS didn't let us scan (missing Full Disk Access, or a denial that
-    /// Full Disk Access resolves).
+    /// Full Disk Access resolves), with the reason.
+    var unavailable: [CleanupUnavailable] {
+        report?.unavailable ?? []
+    }
+
     var categoriesNeedingAccess: [CleanupCategory] {
-        (report?.unavailable ?? []).map(\.category)
+        unavailable.map(\.category)
+    }
+
+    func unavailableItems(in section: CleanupSection) -> [CleanupUnavailable] {
+        unavailable.filter { $0.category.section == section }
     }
 
     var inUseCount: Int {
@@ -112,6 +122,43 @@ final class CleanupScreenModel {
 
     var selectionMovesToTrash: Int {
         flow.selectedItems.filter { $0.deletion == .trash }.count
+    }
+
+    /// Selected items emptied from a Trash (deleted for good).
+    var selectionEmptiesTrash: Int {
+        flow.selectedItems.filter(Self.isTrashBinItem).count
+    }
+
+    /// What the pending Clean acts on: the selection of `cleanScope`, or all of it.
+    var pendingSelection: [ScanItem] {
+        guard let scope = cleanScope else { return flow.selectedItems }
+        return group(for: scope)?.allItems.filter(\.isSelected) ?? []
+    }
+
+    nonisolated static func isTrashBinItem(_ item: ScanItem) -> Bool {
+        item.metadata[CleanupMetadataKey.category] == CleanupCategory.trashBins.rawValue
+    }
+
+    /// The scanning checklist (only when more than one section is scanned).
+    var scanSteps: [PrismScanStep] {
+        guard scanningSections.count > 1 else { return [] }
+        var live: [CleanupSection: CleanupSectionProgress] = [:]
+        for progress in engine.scanSectionProgress { live[progress.section] = progress }
+        return CleanupSection.allCases.filter { scanningSections.contains($0) }.map { section in
+            PrismScanStep(id: section.rawValue, title: section.title, symbol: section.symbol,
+                          state: live[section].map(Self.stepState) ?? .waiting)
+        }
+    }
+
+    nonisolated private static func stepState(_ progress: CleanupSectionProgress) -> PrismScanStep.State {
+        switch progress.status {
+        case .waiting: return .waiting
+        case .running: return .running
+        case .found(let bytes): return .done(ByteFormat.string(bytes))
+        case .nothingFound: return .done("Nothing found")
+        case .unavailable(let reason): return .skipped(reason)
+        case .excluded: return .skipped("Excluded in Settings")
+        }
     }
 
     // MARK: Lifecycle
@@ -222,11 +269,16 @@ final class CleanupScreenModel {
 
     // MARK: Cleaning
 
-    /// Clean button: first asks to quit apps whose data is selected, then confirms
-    /// non-safe selections, then runs.
-    func requestClean() {
-        let selected = flow.selectedItems
-        guard !selected.isEmpty else { return }
+    /// Clean button (the orb, or a card's Clean for one `section`): first asks to quit
+    /// apps whose data is selected, then confirms non-safe selections, then runs.
+    func requestClean(in section: CleanupSection? = nil) {
+        guard !flow.isBusy, !isWaitingForApps else { return }
+        cleanScope = section
+        let selected = pendingSelection
+        guard !selected.isEmpty else {
+            cleanScope = nil
+            return
+        }
         let runningApps = NSWorkspace.shared.runningApplications
         let running = Set(runningApps.compactMap(\.bundleIdentifier))
         let owners = CleanupOwnership.runningOwners(of: selected, running: running)
@@ -242,7 +294,12 @@ final class CleanupScreenModel {
     }
 
     private func continueClean() {
-        if flow.selectedItems.contains(where: { $0.safety != .safe }) {
+        let selection = pendingSelection
+        guard !selection.isEmpty else {
+            cleanScope = nil
+            return
+        }
+        if selection.contains(where: { $0.safety != .safe }) {
             confirmNonSafe = true
             return
         }
@@ -251,8 +308,17 @@ final class CleanupScreenModel {
 
     func runNow() {
         confirmNonSafe = false
+        let items = pendingSelection
+        cleanScope = nil
         route = .overview
-        flow.run()
+        guard !items.isEmpty else { return }
+        flow.run(items)
+    }
+
+    /// Dismisses the "items macOS can't rebuild" confirmation without cleaning.
+    func cancelConfirmation() {
+        confirmNonSafe = false
+        cleanScope = nil
     }
 
     /// Deselects the items of the apps in the prompt and cleans the rest.
@@ -260,13 +326,12 @@ final class CleanupScreenModel {
         guard let prompt = quitPrompt else { return }
         quitPrompt = nil
         let ids = prompt.apps.compactMap(\.bundleID)
-        for item in flow.selectedItems {
+        for item in pendingSelection {
             guard let owner = item.metadata[CleanupMetadataKey.owner] else { continue }
             if ids.contains(where: { CleanupOwnership.matches(owner: owner, bundleID: $0) }) {
                 flow.setSelected(false, itemID: item.id)
             }
         }
-        if flow.selectedItems.isEmpty { return }
         continueClean()
     }
 
@@ -280,7 +345,9 @@ final class CleanupScreenModel {
         for app in appsBeingQuit { app.terminate() }
         Task { @MainActor [weak self] in
             let deadline = Date().addingTimeInterval(15)
-            while let self, Date() < deadline, self.appsBeingQuit.contains(where: { !$0.isTerminated }) {
+            while Date() < deadline {
+                guard let model = self else { return }
+                if !model.appsBeingQuit.contains(where: { !$0.isTerminated }) { break }
                 try? await Task.sleep(nanoseconds: 250_000_000)
             }
             guard let self else { return }
@@ -292,6 +359,7 @@ final class CleanupScreenModel {
 
     func cancelQuitPrompt() {
         quitPrompt = nil
+        cleanScope = nil
     }
 }
 
@@ -344,14 +412,14 @@ struct CleanupRootScreen: View {
         }
         .confirmationDialog(nonSafeTitle, isPresented: $screen.confirmNonSafe, titleVisibility: .visible) {
             Button("Clean", role: .destructive) { screen.runNow() }
-            Button("Cancel", role: .cancel) {}
+            Button("Cancel", role: .cancel) { screen.cancelConfirmation() }
         } message: {
             Text(nonSafeMessage)
         }
     }
 
     private var nonSafeItems: [ScanItem] {
-        screen.flow.selectedItems.filter { $0.safety != .safe }
+        screen.pendingSelection.filter { $0.safety != .safe }
     }
 
     private var nonSafeTitle: String {
@@ -388,7 +456,7 @@ struct CleanupPhaseContent: View {
             CleanupIdleScreen(screen: screen)
         case .scanning:
             ScanningView(module: .cleanup, progress: screen.flow.progress, title: screen.scanTitle,
-                         onStop: { screen.flow.cancel() })
+                         onStop: { screen.flow.cancel() }, steps: screen.scanSteps)
         case .results:
             switch screen.route {
             case .overview:

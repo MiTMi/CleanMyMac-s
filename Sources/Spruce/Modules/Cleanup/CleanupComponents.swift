@@ -13,13 +13,19 @@ enum CleanupCardState: Equatable {
 }
 
 /// One results card per Cleanup section (System Junk is the tall lead card).
+///
+/// Each card shows what was found and what is selected. A card whose selection is
+/// empty offers only Review — never a Clean button that would act on nothing.
 struct CleanupSectionCard: View {
     let section: CleanupSection
     let group: ScanGroup?
     let state: CleanupCardState
     var isLead: Bool = false
     var inUseCount: Int = 0
+    /// Categories of this section macOS didn't let Spruce scan, with the reason.
+    var unavailable: [CleanupUnavailable] = []
     var onReview: () -> Void
+    var onClean: () -> Void
     var onToggle: () -> Void
     var onScan: () -> Void
     var onGrantAccess: () -> Void
@@ -33,20 +39,7 @@ struct CleanupSectionCard: View {
                     .font(SpruceFont.callout)
                     .foregroundStyle(Ink.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-                if state == .ready, let group {
-                    Text("\(ByteFormat.string(group.selectedSize)) selected · \(CountFormat.items(group.totalCount))")
-                        .font(SpruceFont.caption.monospacedDigit())
-                        .foregroundStyle(Ink.tertiary)
-                    if isLead {
-                        CleanupIncludesList(group: group)
-                    }
-                    if inUseCount > 0 {
-                        Label("\(CountFormat.items(inUseCount)) left alone because their apps are open",
-                              systemImage: "lock")
-                            .font(SpruceFont.caption)
-                            .foregroundStyle(StatusColor.warning)
-                    }
-                }
+                details
                 Spacer(minLength: 0)
                 actions
             }
@@ -55,6 +48,46 @@ struct CleanupSectionCard: View {
         .opacity(state == .notScanned ? 0.7 : 1)
         .accessibilityElement(children: .contain)
         .accessibilityLabel(accessibilityText)
+    }
+
+    @ViewBuilder
+    private var details: some View {
+        if state == .ready, let group {
+            Text(selectionLine(group))
+                .font(SpruceFont.caption.monospacedDigit())
+                .foregroundStyle(Ink.tertiary)
+            if isLead {
+                CleanupIncludesList(group: group)
+            }
+            if inUseCount > 0 {
+                Label("\(CountFormat.items(inUseCount)) left alone because their apps are open",
+                      systemImage: "lock")
+                    .font(SpruceFont.caption)
+                    .foregroundStyle(StatusColor.warning)
+            }
+        }
+        if isLead && (state == .ready || state == .empty) && !unavailable.isEmpty {
+            CleanupUnavailableList(items: unavailable)
+        }
+    }
+
+    private func selectionLine(_ group: ScanGroup) -> String {
+        if group.selectedCount == 0 {
+            return "Nothing selected · \(CountFormat.items(group.totalCount)) to review"
+        }
+        return "\(ByteFormat.string(group.selectedSize)) selected · \(CountFormat.items(group.totalCount))"
+    }
+
+    /// Whether the card checkbox can do something: clear a selection, or restore a
+    /// recommended one.
+    private var canToggle: Bool {
+        guard let group else { return false }
+        return group.selectedCount > 0
+            || group.allItems.contains { $0.metadata[CleanupMetadataKey.recommended] == "1" && $0.safety != .risky }
+    }
+
+    private var cleanTitle: String {
+        section == .trashBins ? "Empty" : "Clean"
     }
 
     private var header: some View {
@@ -69,7 +102,7 @@ struct CleanupSectionCard: View {
                 .tracking(0.8)
                 .foregroundStyle(Ink.secondary)
             Spacer(minLength: Spacing.s)
-            if state == .ready, let group {
+            if state == .ready, let group, canToggle {
                 SpruceCheckbox(state: group.selectionState, module: .cleanup, label: "Clean \(section.title)",
                                action: onToggle)
                     .help(group.selectedCount > 0 ? "Don't clean \(section.title)" : "Select the recommended items")
@@ -109,6 +142,13 @@ struct CleanupSectionCard: View {
             switch state {
             case .ready:
                 CapsuleButton(title: "Review", symbol: "list.bullet", action: onReview)
+                if let group, group.selectedCount > 0 {
+                    CapsuleButton(title: "\(cleanTitle) \(ByteFormat.string(group.selectedSize))", prominent: true,
+                                  action: onClean)
+                        .help(section == .trashBins
+                              ? "Empty the selected Trash items for good"
+                              : "Clean only the selected items of \(section.title)")
+                }
             case .empty:
                 EmptyView()
             case .notScanned:
@@ -157,6 +197,35 @@ struct CleanupIncludesList: View {
                 Text("and \(CountFormat.items(group.children.count - top.count, singular: "more category", plural: "more categories"))")
                     .font(SpruceFont.caption)
                     .foregroundStyle(Ink.tertiary)
+            }
+        }
+        .padding(.top, Spacing.xs)
+    }
+}
+
+/// Categories that couldn't be scanned, each with its reason ("Needs Full Disk Access").
+struct CleanupUnavailableList: View {
+    let items: [CleanupUnavailable]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach(items) { item in
+                HStack(spacing: Spacing.s) {
+                    Image(systemName: "lock.fill")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(StatusColor.warning)
+                        .frame(width: 16)
+                    Text(item.category.title)
+                        .font(SpruceFont.callout)
+                        .foregroundStyle(Ink.secondary)
+                        .lineLimit(1)
+                    Spacer(minLength: Spacing.s)
+                    Text(item.message)
+                        .font(SpruceFont.caption)
+                        .foregroundStyle(StatusColor.warning)
+                        .lineLimit(1)
+                }
+                .accessibilityElement(children: .combine)
             }
         }
         .padding(.top, Spacing.xs)
@@ -237,8 +306,10 @@ struct CleanupInsightRow: View {
 
 // MARK: - Full Disk Access banner
 
+/// Shown on the results when some categories couldn't be scanned. Tells a missing
+/// Full Disk Access permission apart from a location macOS refused anyway.
 struct CleanupAccessBanner: View {
-    let categories: [CleanupCategory]
+    let unavailable: [CleanupUnavailable]
     var onOpenSettings: () -> Void
     var onCheckAgain: () -> Void
 
@@ -249,7 +320,7 @@ struct CleanupAccessBanner: View {
                     .font(.system(size: 20, weight: .medium))
                     .foregroundStyle(StatusColor.warning)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Full Disk Access is off")
+                    Text(needsFullDiskAccess ? "Full Disk Access is off" : "Some places couldn't be read")
                         .font(SpruceFont.headline)
                         .foregroundStyle(Ink.primary)
                     Text(message)
@@ -258,21 +329,29 @@ struct CleanupAccessBanner: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: Spacing.s)
-                CapsuleButton(title: "Check Again", action: onCheckAgain)
+                CapsuleButton(title: needsFullDiskAccess ? "Check Again" : "Scan Again", action: onCheckAgain)
                 CapsuleButton(title: "Open Settings", symbol: "arrow.up.right", prominent: true, action: onOpenSettings)
             }
         }
+        .accessibilityElement(children: .contain)
+    }
+
+    private var needsFullDiskAccess: Bool {
+        unavailable.contains { $0.reason == .fullDiskAccess }
     }
 
     private var message: String {
-        let names = categories.map(\.title)
+        let names = unavailable.map(\.category.title)
         let list: String
         switch names.count {
         case 0: list = "some locations"
         case 1: list = names[0]
         default: list = names.dropLast().joined(separator: ", ") + " and " + (names.last ?? "")
         }
-        return "Spruce couldn't look at \(list). Turn on Full Disk Access for Spruce in System Settings, then scan again."
+        if needsFullDiskAccess {
+            return "Spruce couldn't look at \(list). Turn on Full Disk Access for Spruce in System Settings › Privacy & Security, then scan again."
+        }
+        return "macOS didn't let Spruce read \(list). Check that Spruce is still on in System Settings › Privacy & Security › Full Disk Access, then scan again."
     }
 }
 

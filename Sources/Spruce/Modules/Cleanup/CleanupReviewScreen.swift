@@ -15,9 +15,10 @@ struct CleanupReviewScreen: View {
                          trailing: AnyView(CleanupReviewToolbar(screen: screen, section: section)))
             ReviewSplitView(module: .cleanup, groups: groupsBinding,
                             emptyTitle: emptyTitle, emptyMessage: emptyMessage,
-                            onIgnore: { screen.flow.ignore($0) })
+                            onIgnore: ignoreAction)
                 .id(section?.rawValue ?? "all")
-            CleanupFooterNotes(needsAdmin: screen.selectionNeedsAdmin, movesToTrash: screen.selectionMovesToTrash)
+            CleanupFooterNotes(needsAdmin: screen.selectionNeedsAdmin, movesToTrash: screen.selectionMovesToTrash,
+                               emptiesTrash: screen.selectionEmptiesTrash)
             ResultsFooter(module: .cleanup, selectedBytes: screen.flow.selectedSize,
                           selectedCount: screen.flow.selectedCount, actionTitle: "Clean",
                           totalBytes: screen.flow.totalSize, totalCount: screen.flow.groups.allItems.count) {
@@ -53,6 +54,14 @@ struct CleanupReviewScreen: View {
                 flow.groups = all
             }
         )
+    }
+
+    /// "Add to Ignore List". Trash contents have no ignore list: they're already
+    /// thrown away, so ignoring them would only hide them.
+    private var ignoreAction: ((ScanItem) -> Void)? {
+        guard section != .trashBins else { return nil }
+        let flow = screen.flow
+        return { item in flow.ignore(item) }
     }
 
     private var focusedGroups: [ScanGroup] {
@@ -110,8 +119,9 @@ struct CleanupReviewToolbar: View {
         }
     }
 
+    /// Sections with results, plus the one on screen (even if it's empty now).
     private var availableSections: [CleanupSection] {
-        CleanupSection.allCases.filter { screen.group(for: $0) != nil }
+        CleanupSection.allCases.filter { screen.group(for: $0) != nil || $0 == section }
     }
 
     private var sectionBinding: Binding<CleanupSection?> {

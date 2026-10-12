@@ -14,8 +14,8 @@ struct CleanupResultsScreen: View {
                          trailing: AnyView(CapsuleButton(title: "Review Details", symbol: "list.bullet.rectangle") {
                              screen.route = .review(nil)
                          }))
-            if !screen.categoriesNeedingAccess.isEmpty {
-                CleanupAccessBanner(categories: screen.categoriesNeedingAccess,
+            if !screen.unavailable.isEmpty {
+                CleanupAccessBanner(unavailable: screen.unavailable,
                                     onOpenSettings: { Permissions.openFullDiskAccessSettings() },
                                     onCheckAgain: checkAccessAgain)
             }
@@ -28,7 +28,8 @@ struct CleanupResultsScreen: View {
                 .padding(.bottom, Spacing.m)
             }
             .scrollIndicators(.never)
-            CleanupFooterNotes(needsAdmin: screen.selectionNeedsAdmin, movesToTrash: screen.selectionMovesToTrash)
+            CleanupFooterNotes(needsAdmin: screen.selectionNeedsAdmin, movesToTrash: screen.selectionMovesToTrash,
+                               emptiesTrash: screen.selectionEmptiesTrash)
             ResultsFooter(module: .cleanup, selectedBytes: screen.flow.selectedSize,
                           selectedCount: screen.flow.selectedCount, actionTitle: "Clean",
                           totalBytes: screen.flow.totalSize, totalCount: screen.flow.groups.allItems.count) {
@@ -74,7 +75,9 @@ struct CleanupResultsScreen: View {
             state: state(for: section, group: group),
             isLead: isLead,
             inUseCount: section == .systemJunk ? screen.inUseCount : 0,
+            unavailable: section == .systemJunk ? screen.unavailableItems(in: .systemJunk) : [],
             onReview: { screen.route = .review(section) },
+            onClean: { screen.requestClean(in: section) },
             onToggle: { screen.toggleSection(section) },
             onScan: { screen.startScan() },
             onGrantAccess: { Permissions.openFullDiskAccessSettings() }
@@ -84,14 +87,19 @@ struct CleanupResultsScreen: View {
     private func state(for section: CleanupSection, group: ScanGroup?) -> CleanupCardState {
         guard screen.scannedSections.contains(section) else { return .notScanned }
         if let group, !group.isEmpty { return .ready }
-        let blocked = screen.categoriesNeedingAccess.contains { $0.section == section }
+        let blocked = !screen.unavailableItems(in: section).isEmpty
         if blocked && section != .systemJunk { return .needsAccess }
         return .empty
     }
 
+    /// "Check Again" re-reads the permission; the scan reruns as soon as it is granted
+    /// (or right away when access was on but macOS refused a location).
     private func checkAccessAgain() {
         model.refreshPermissions()
-        if model.hasFullDiskAccess { screen.startScan() }
+        let missingAccess = screen.unavailable.contains { $0.reason == .fullDiskAccess }
+        if model.hasFullDiskAccess || !missingAccess {
+            screen.startScan(sections: screen.scannedSections)
+        }
     }
 }
 
@@ -129,26 +137,47 @@ struct CleanupHeadline: View {
     }
 }
 
-/// One-line notes about how the selection will be handled.
+/// Short notes about how the selection will be handled (password prompt, what goes to
+/// the Trash, what is deleted for good).
 struct CleanupFooterNotes: View {
     let needsAdmin: Bool
     let movesToTrash: Int
+    var emptiesTrash: Int = 0
 
     var body: some View {
-        if needsAdmin || movesToTrash > 0 {
+        let notes = self.notes
+        if !notes.isEmpty {
             HStack(spacing: Spacing.l) {
-                if needsAdmin {
-                    Label("Includes system files: macOS asks for your administrator password once.", systemImage: "key")
-                }
-                if movesToTrash > 0 {
-                    Label("\(CountFormat.items(movesToTrash)) will go to the Trash so you can put them back.",
-                          systemImage: "trash")
+                ForEach(notes, id: \.text) { note in
+                    Label(note.text, systemImage: note.symbol)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
                 }
             }
             .font(SpruceFont.caption)
             .foregroundStyle(Ink.tertiary)
-            .lineLimit(1)
             .frame(maxWidth: .infinity)
+            .accessibilityElement(children: .combine)
         }
+    }
+
+    private struct Note {
+        var text: String
+        var symbol: String
+    }
+
+    private var notes: [Note] {
+        var out: [Note] = []
+        if needsAdmin {
+            out.append(Note(text: "System files: macOS asks for your password once", symbol: "key"))
+        }
+        if movesToTrash > 0 {
+            out.append(Note(text: "\(CountFormat.items(movesToTrash)) go to the Trash, so you can put them back",
+                            symbol: "arrow.uturn.backward"))
+        }
+        if emptiesTrash > 0 {
+            out.append(Note(text: "Emptying the Trash can't be undone", symbol: "trash"))
+        }
+        return out
     }
 }
