@@ -76,21 +76,79 @@ SENSITIVE_PATH = re.compile(r"(/\.claude/(settings(\.local)?\.json|skills/|agent
                             r"/\.claude\.json$|/CLAUDE\.md$)")
 
 
+OPS = {";", "&&", "||", "|", "&", "|&", "\n"}
+READ_ONLY = {"grep", "egrep", "fgrep", "rg", "ag", "ack", "sort", "uniq", "head", "tail", "wc", "cat",
+             "less", "more", "strings", "file", "ls", "stat", "du", "df", "diff", "cut", "tr", "jq",
+             "nl", "column", "otool", "nm", "plutil", "codesign", "shasum", "sha256sum", "md5",
+             "which", "basename", "dirname", "realpath", "tree", "xxd", "hexdump", "cd", "pwd"}
+
+
+def _tokens(cmd):
+    try:
+        lx = shlex.shlex(cmd.replace("\n", " ; "), posix=True, punctuation_chars=True)
+        lx.whitespace_split = True
+        return list(lx)
+    except ValueError:
+        return None
+
+
 def _segments(cmd):
-    for seg in re.split(r"&&|\|\||;|\n|\|(?!\|)", cmd):
-        seg = seg.strip()
+    toks = _tokens(cmd)
+    if toks is None:
+        toks = cmd.split()
+    seg = []
+    for t in toks + [";"]:
+        if t in OPS:
+            while seg and re.match(r"^\w+=", seg[0]):
+                seg = seg[1:]
+            if seg and seg[0] in ("sudo", "env", "time", "exec", "nohup"):
+                seg = seg[1:]
+            if seg:
+                yield seg
+            seg = []
+        else:
+            seg.append(t)
+
+
+def effective_command(cmd):
+    """The command with arguments removed from pipelines made only of read-only tools,
+    so `grep 'LaunchAgents|.ssh' strings.txt | sort` isn't mistaken for doing it.
+    Any pipeline that also writes, executes or talks to the network is kept verbatim."""
+    toks = _tokens(cmd)
+    if toks is None:
+        return cmd
+    out, pipe = [], [[]]
+
+    def is_ro(seg):
         if not seg:
-            continue
-        try:
-            toks = shlex.split(seg)
-        except ValueError:
-            toks = seg.split()
-        while toks and re.match(r"^\w+=", toks[0]):
-            toks = toks[1:]
-        if toks and toks[0] in ("sudo", "env", "time", "exec", "nohup"):
-            toks = toks[1:]
-        if toks:
-            yield toks
+            return True
+        exe = seg[0].rsplit("/", 1)[-1]
+        if any(t.startswith(">") or t == "&>" for t in seg):
+            return False
+        if exe == "find":
+            return not any(t in ("-exec", "-execdir", "-delete", "-ok", "-okdir") for t in seg)
+        return exe in READ_ONLY
+
+    def flush(op):
+        segs = [x for x in pipe if x]
+        ro = all(is_ro(x) for x in segs)
+        for i, x in enumerate(segs):
+            if i:
+                out.append("|")
+            out.extend([x[0].rsplit("/", 1)[-1]] if ro else
+                       [t if t in ("<", ">", ">>", "2>", "&>") else shlex.quote(t) for t in x])
+        if op:
+            out.append(op)
+    for t in toks:
+        if t in ("|", "|&"):
+            pipe.append([])
+        elif t in OPS:
+            flush(t)
+            pipe = [[]]
+        else:
+            pipe[-1].append(t)
+    flush(None)
+    return " ".join(out)
 
 
 def install_targets(cmd):

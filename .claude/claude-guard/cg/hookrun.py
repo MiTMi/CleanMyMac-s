@@ -8,9 +8,13 @@ import time
 
 from . import engine
 from .checks import mcp_config_checks, resolve_package, settings_checks
-from .hooks import _emit, _summ, install_targets, SENSITIVE_PATH, BUDGET
+from .hooks import _emit, _summ, install_targets, effective_command, SENSITIVE_PATH, BUDGET
 from .model import Result, Component, GUARD_HOME, short_path
 from .scan import scan_text, skill_checks
+
+
+MAC_ONLY = {"PERSIST-LAUNCHD", "PERSIST-API", "GATEKEEPER", "CRED-KEYCHAIN", "KEYCHAIN-API",
+            "OSASCRIPT-PHISH", "CLIPBOARD-SCREEN", "CRED-BROWSER"}
 
 
 def _decision(results, what):
@@ -113,7 +117,10 @@ def pre_tool_use(inp):
     if tool == "Bash":
         cmd = tin.get("command") or ""
         what = "this command"
-        own = Result(Component("command", "bash", "Bash"), scan_text(cmd, "shell", "Bash command"))
+        own = Result(Component("command", "bash", "Bash"),
+                     scan_text(effective_command(cmd), "shell", "Bash command"))
+        if sys.platform != "darwin":   # e.g. a Linux cloud session: macOS-only techniques can't run there
+            own.findings = [f for f in own.findings if f.rule not in MAC_ONLY]
         own.findings = [f for f in own.findings if f.level >= 3]
         results.append(own)
         for label, job in install_targets(cmd):
