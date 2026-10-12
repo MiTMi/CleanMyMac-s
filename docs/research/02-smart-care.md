@@ -930,3 +930,29 @@ Adversarial fact-check pass, 2026-10-12.
 - **Smart Care behaviors:** the quit-apps prompt for app updates; which duplicate copy is kept; the default selection of external-drive Trash; the Performance tile's contents on macOS 15/26.
 - **MacPaw's non-sudo "free RAM" mechanism** in the CLI.
 - **All macpaw.com KB-excerpt claims.** Not re-verifiable in this pass; see "Access constraints" above.
+
+---
+
+## Addendum (gap-fill)
+
+See `20-gap-01-cmm5-shell-smartcare-screens.md` (2026-10-12) for a screen-by-screen reconstruction of Smart Care in 5.x (landing, 3 + 2 scanning stage, results tiles, Manager review, running, completion, Start Over). It is anchored on **real CleanMyMac X Smart Scan screenshots** (dora-ai route 1). On §15:
+- **Gap 1:** per-card scanning, likely.
+- **Gap 2:** Stop exists in X during scan and Run (VERIFIED); likely in 5.x.
+- **Gap 3:** X's completion layout is now known (VERIFIED); 5.x is still open.
+- **Gap 4:** X's Smart Scan prompts to quit apps during Run (VERIFIED).
+- **Gap 6:** the Performance tile likely holds two tasks, Flush DNS Cache + Free Up RAM (5.5.7 hands-on shows "2 maintenance tasks").
+- **Gap 9:** X's empty pillar showed a green "OK"; 5.x is still open.
+
+## Addendum (gap-fill)
+
+See `20-gap-06-cmm5-settings-prefkeys-alerts.md` (2026-10-12) for §15 gap 9.
+- 5.x has a `SmartCareReminderEnabled` toggle (App Group plist; VERIFIED-OSS). No frequency key was found.
+- X stored Smart Scan exclusions as `SmartScanModuleDisabledTasks` (a dict of disabled task IDs, e.g. `CMMalwaresModuleScanIdentifierDetection`; VERIFIED-OSS). Store exclusions the same way in our Checkup settings (`checkup.excluded`).
+
+## Addendum (gap-fill, 20-gap-08)
+
+See `20-gap-08-cmm5-menus-shortcuts-integrations.md` §6 (2026-10-12) on the §3.1 deep links.
+- `cleanmymac5:///modules/<name>` is still single-sourced (GitHub code search finds no second source).
+- Lineage is now VERIFIED: CleanMyMac 3 registered `cleanmymac://` with licensing and marketing routes (`/activate`, `/buy_license`, `/about`, `/support_center`, …) plus launch arguments (`-scheduledScan`, `-fullScan`, `-freeSpace`, `-cleanTrash`, `-uninstall`). X registered `cleanmymacx://` ("multipurpose URL: activation etc.").
+- Our `spruce://` route table and its safety rule: URLs may navigate or start read-only scans, never delete. See its §6.4.
+- **Keys:** CMM3 bound **Scan = ↩** and **Rescan = ⌘R** (VERIFIED from its `MainMenu.nib`). This supports §5's ⌘R choice and ⇧⌘R for reveal.

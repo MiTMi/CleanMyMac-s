@@ -2171,3 +2171,27 @@ Status after the fact-check pass is given in **bold** at the end of each item.
 - absolute X window points.
 
 The best next step is unchanged: install the 5.7.x trial on the Mac mini, record the screens, and read `defaults read com.macpaw.CleanMyMac5` plus the group-container plist to settle the settings questions. Use these for structure only, never for copying assets or strings.
+
+---
+
+## Addendum (gap-fill)
+
+See `20-gap-01-cmm5-shell-smartcare-screens.md` (2026-10-12). On §7:
+- **Gap 6 (rail collapse):** now three independent clones collapse the rail during Smart Care, and real X screenshots show a progress pie on the running flow's sidebar row.
+- **Gaps 5, 7, 8:** onboarding is video-led; the canvas stays dark while review "Managers" are white cards; X's completion choreography is documented (VERIFIED from screenshots).
+- **Gaps 1 and 3** (window size, Liquid Glass) remain open. Its §9 gives a 10-minute on-device protocol. Its §10 lists deltas to Part B (stage-card scanning, rail ring badge, live total by the orb, completion with View Log).
+
+### From 20-gap-04 (2026-10-12): Health gauge states
+
+On §4.4 "Poor/Unknown" vs the KB bands, see `20-gap-04-cmm5-tools-activity-health-notifications.md` §5.2. INFERRED reading:
+- `HealthStatusPoor` is the image behind the KB's **Requires Attention** band (same ordinal, five graded states);
+- `HealthStatusUnknown` is a **not-rated** state (before the first scan or first monitor sample).
+
+Ours: Excellent · Good · Fair · **Needs Attention** · Critical, plus "Not rated yet" (dashed ring). Its §3.8, §4.6 and §6.2 add Toolbox, Activity and Notifications blueprints in our Part B tokens.
+
+## Addendum (gap-fill)
+
+See `20-gap-06-cmm5-settings-prefkeys-alerts.md` §3.1 (2026-10-12) for §7 gap 7.
+- `SoundsEnabled` and `CustomThemes` are App Group keys, default-on by inference (users write `false` to disable them).
+- 5.0.7 release notes say the app follows macOS accessibility settings to simplify visual effects (VERIFIED-D), so there is no in-app motion toggle.
+- X 4.10.4 made the Ukrainian theme switchable "in the Preferences" (VERIFIED-D).

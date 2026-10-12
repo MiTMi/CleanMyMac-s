@@ -1242,3 +1242,13 @@ Adversarial fact-check pass, 2026-10-12.
 - Talos as discoverer of the 2017 CCleaner compromise. The Jumpshot/FTC history.
 - Absence of XProtect or Gatekeeper action against CleanMyMac. Check on device in `XProtect.meta.plist` and `XPScripts.yr`.
 - TN2206 was last revised in 2016. Its "removal does not invalidate" rule should be re-tested on macOS 15/26 with `codesign --verify --deep --strict` on a thinned copy before we rely on it.
+
+---
+
+## Addendum (gap-fill)
+
+**§5.7 Gmail cleanup → see `20-gap-05-cmm5-email-cleanup.md` (2026-10-12).** It upgrades the RECALLED notes above:
+- `gmail.readonly`, `gmail.modify`, `gmail.metadata`, `gmail.compose`, `gmail.settings.basic` and `https://mail.google.com/` are **Restricted** (VERIFIED-2ND).
+- A personal build can publish **In production** unverified under Google's personal-use exemption (<100 users). That removes the Testing-mode 7-day refresh-token expiry; the warning screen stays (VERIFIED-2ND).
+- The minimal single scope for vendor parity is `gmail.modify` (VERIFIED from Google's discovery doc).
+- Its §6.3 covers OAuth on macOS: an iOS-type client with no secret, ASWebAuthenticationSession and PKCE.

@@ -473,3 +473,22 @@ Implications for our Protection module, which runs the most privileged operation
 **Still uncertain:** MacPaw's exact 5.x strings; Moonlock's detection internals and database location; whether CMM5 ships the ES sysext; 5.2.6+ Protection changes; the Macworld 5.0.4 verdict; several macOS behaviours marked INFERRED, which need on-device verification on 14, 15 and 26 (profiles CLI, Safari profile paths, TCC value meanings, Location-gated SSIDs).
 
 **Cross-team note:** 10-internals (§1, §2.1 table) and 13-helpcenter (§1 item 9, §9.1) state the Moonlock sysext as a verified CleanMyMac 5 component. Per finding 4, that should be softened to "observed on one CMM5 machine; may belong to the standalone Moonlock app". This fact-checker edited only this file.
+
+---
+
+## Addendum (gap-fill)
+
+See `20-gap-02-cmm5-cleanup-protection-performance-screens.md` (2026-10-12) §4 for the 5.x Protection flow. It covers:
+- one scan feeding a tile dashboard (malware tile plus privacy and app-permission tiles), reviewed in a shared three-pane manager;
+- the scan-mode picker in Settings › Protection, with a "Scan mode · Configure…" shortcut on the landing (verified on real X screenshots);
+- the per-browser Privacy categories, where Wi-Fi is present, chats are probably absent and saved passwords are at most informational;
+- the App Permissions grouping and the Remove (revoke) action, as seen in X's Privacy › Application Permissions screenshot.
+
+This partly answers §15 gaps 2 and 6. Exact 5.x strings remain unverified.
+
+## Addendum (gap-fill)
+
+See `20-gap-06-cmm5-settings-prefkeys-alerts.md` §2.2 and §3.5 (2026-10-12).
+- The nine-tab "REPLICA" Settings strip in §5 is CleanMyMac **X 4.14/4.15** (Moonlock badge plus Speed/Depth/Purpose scan modes, from 4.14.0 and 4.15.0 release notes).
+- 5.x stores **Enable Malware Monitor** as `MalwareScanMode` = `"protected"` | `"manual"` (string, App Group plist; VERIFIED-OSS).
+- The scan-depth, background-scan and extra-location keys are still unknown.

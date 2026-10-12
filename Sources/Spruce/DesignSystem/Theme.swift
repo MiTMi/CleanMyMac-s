@@ -1,4 +1,6 @@
+import AppKit
 import SpruceCore
+import SpruceMac
 import SwiftUI
 
 // Design system "Prism" — original tokens (see docs/research/09-design.md, Part B).
@@ -17,6 +19,35 @@ extension Color {
             blue: Double(hex & 0xFF) / 255,
             opacity: opacity
         )
+    }
+
+    /// Linear sRGB mix of two colours (`fraction` 0 → self, 1 → `other`). Works on
+    /// macOS 14 (SwiftUI's `Color.mix(with:by:)` is macOS 15+).
+    func prismMix(_ other: Color, _ fraction: Double) -> Color {
+        let t = min(max(fraction, 0), 1)
+        let a = PrismRGBA(self)
+        let b = PrismRGBA(other)
+        return Color(.sRGB,
+                     red: a.r + (b.r - a.r) * t,
+                     green: a.g + (b.g - a.g) * t,
+                     blue: a.b + (b.b - a.b) * t,
+                     opacity: a.a + (b.a - a.a) * t)
+    }
+}
+
+/// sRGB components of a SwiftUI colour (via AppKit).
+struct PrismRGBA {
+    var r: Double
+    var g: Double
+    var b: Double
+    var a: Double
+
+    init(_ color: Color) {
+        let ns = NSColor(color).usingColorSpace(.sRGB) ?? NSColor(srgbRed: 0, green: 0, blue: 0, alpha: 1)
+        r = Double(ns.redComponent)
+        g = Double(ns.greenComponent)
+        b = Double(ns.blueComponent)
+        a = Double(ns.alphaComponent)
     }
 }
 
@@ -39,6 +70,32 @@ struct ModulePalette {
     var accentGradient: LinearGradient {
         LinearGradient(colors: [accent, accent2], startPoint: .topLeading, endPoint: .bottomTrailing)
     }
+
+    /// Fill of the rounded-square category badge (B.8.7): accent → glow, top to bottom.
+    var badgeGradient: LinearGradient {
+        LinearGradient(colors: [accent, glow], startPoint: .top, endPoint: .bottom)
+    }
+
+    /// Hero glyph gradient: white → accent2 (B.10.2 layer 4).
+    var glyphGradient: LinearGradient {
+        LinearGradient(colors: [Color.white, accent2], startPoint: .top, endPoint: .bottom)
+    }
+
+    /// Lens body (B.10.2 layer 2): accent2 → accent → canvasBottom, lit from the top-left.
+    func lensBody(diameter: CGFloat) -> RadialGradient {
+        RadialGradient(colors: [accent2.opacity(0.9), accent, canvasBottom.opacity(0.95)],
+                       center: UnitPoint(x: 0.35, y: 0.30), startRadius: 0, endRadius: diameter * 0.75)
+    }
+
+    /// Progress arc gradient spanning exactly the drawn sweep: tail accent2 → head accent.
+    func ringGradient(fraction: Double) -> AngularGradient {
+        AngularGradient(gradient: Gradient(colors: [accent2, accent]), center: .center,
+                        startAngle: .degrees(0), endAngle: .degrees(max(1, 360 * fraction)))
+    }
+
+    /// Opaque surface used instead of materials under Reduce Transparency (B.6):
+    /// canvasBottom mixed 20 % with white.
+    var solidSurface: Color { canvasBottom.prismMix(.white, 0.20) }
 }
 
 extension ModuleID {
@@ -100,6 +157,31 @@ enum Ink {
     static let subtleFill = Color.white.opacity(0.06)
     static let controlFill = Color.white.opacity(0.10)
     static let selectedFill = Color.white.opacity(0.14)
+    /// Scrim behind sheets (B.3.1).
+    static let scrim = Color(hex: 0x05050A, opacity: 0.55)
+}
+
+/// Contrast-aware ink (B.14 "Increase Contrast": hairlines 30 %, secondary 88 %).
+/// Components read `@Environment(\.colorSchemeContrast)` and build one of these.
+struct PrismInk {
+    var increased: Bool
+
+    init(_ contrast: ColorSchemeContrast) {
+        increased = contrast == .increased
+    }
+
+    var primary: Color { Ink.primary }
+    var secondary: Color { increased ? Color.white.opacity(0.88) : Ink.secondary }
+    var tertiary: Color { increased ? Color.white.opacity(0.80) : Ink.tertiary }
+    var hairline: Color { increased ? Color.white.opacity(0.30) : Ink.hairline }
+    var highlight: Color { increased ? Color.white.opacity(0.34) : Ink.highlight }
+    var subtleFill: Color { increased ? Color.white.opacity(0.10) : Ink.subtleFill }
+    var controlFill: Color { increased ? Color.white.opacity(0.18) : Ink.controlFill }
+    var selectedFill: Color { increased ? Color.white.opacity(0.22) : Ink.selectedFill }
+    /// Unchecked checkbox stroke (B.8.8: 1.5 pt white 40 %).
+    var checkboxStroke: Color { increased ? Color.white.opacity(0.78) : Color.white.opacity(0.42) }
+    /// Glows are disabled under Increase Contrast.
+    var glowScale: Double { increased ? 0 : 1 }
 }
 
 enum StatusColor {
@@ -130,14 +212,36 @@ enum StatusColor {
 enum SpruceFont {
     /// Giant thin numerals (hero metrics).
     static func numeral(_ size: CGFloat) -> Font { .system(size: size, weight: .thin, design: .rounded).monospacedDigit() }
-    /// Module hero titles.
-    static func display(_ size: CGFloat = 34) -> Font { .system(size: size, weight: .semibold, design: .rounded) }
-    static let title = Font.system(size: 22, weight: .semibold, design: .rounded)
+    /// Module hero titles (B.4 `display`: light; apply `.tracking(-0.4)` at 40 pt).
+    static func display(_ size: CGFloat = 40) -> Font { .system(size: size, weight: .light) }
+    /// Pane and sheet titles.
+    static let title = Font.system(size: 20, weight: .semibold)
+    /// Row / tile headlines.
     static let headline = Font.system(size: 15, weight: .semibold)
     static let body = Font.system(size: 13)
     static let callout = Font.system(size: 12)
     static let caption = Font.system(size: 11)
     static let mono = Font.system(size: 11, design: .monospaced)
+
+    // B.4 additions.
+    /// Flow headlines ("6.2 GB ready to clean", "Scanning…").
+    static let flowHeadline = Font.system(size: 26, weight: .semibold)
+    /// The result number on module result screens.
+    static let metricXL = Font.system(size: 56, weight: .thin, design: .rounded).monospacedDigit()
+    /// Tile metrics.
+    static let metricL = Font.system(size: 34, weight: .light, design: .rounded).monospacedDigit()
+    /// Inline stats, monitor tiles.
+    static let metricS = Font.system(size: 22, weight: .regular, design: .rounded).monospacedDigit()
+    /// Unit next to a metric ("GB").
+    static let unit = Font.system(size: 13, weight: .medium)
+    static let bodyStrong = Font.system(size: 13, weight: .semibold)
+    /// Section headers / eyebrows: use with `.textCase(.uppercase)` and `.tracking(0.8)`.
+    static let overline = Font.system(size: 10, weight: .semibold)
+    static let button = Font.system(size: 13, weight: .semibold)
+    static let orbLabel = Font.system(size: 15, weight: .semibold)
+    static let orbDetail = Font.system(size: 11, weight: .medium).monospacedDigit()
+    /// Captions with numbers (sizes in rows).
+    static let captionDigits = Font.system(size: 11).monospacedDigit()
 }
 
 enum Spacing {
@@ -149,19 +253,81 @@ enum Spacing {
     static let xl: CGFloat = 24
     static let xxl: CGFloat = 32
     static let xxxl: CGFloat = 48
+
+    // B.5 additions (4 pt grid: 2 · 4 · 8 · 12 · 16 · 20 · 24 · 32 · 40 · 48 · 64 · 80).
+    static let l2: CGFloat = 20
+    static let xxl2: CGFloat = 40
+    static let huge: CGFloat = 64
+    static let giant: CGFloat = 80
+    /// Horizontal padding of module content.
+    static let contentInset: CGFloat = 40
+    /// Content starts this far below the window top (traffic lights).
+    static let topInset: CGFloat = 28
+    /// Clearance between the orb disc and the window's bottom edge.
+    static let orbBottom: CGFloat = 28
+    /// Maximum readable content width.
+    static let readableWidth: CGFloat = 1000
 }
 
 enum Radius {
     static let small: CGFloat = 6
     static let control: CGFloat = 8
-    static let card: CGFloat = 14
+    static let card: CGFloat = 18
     static let panel: CGFloat = 18
-    static let sheet: CGFloat = 22
+    static let sheet: CGFloat = 26
+
+    // B.5 additions.
+    /// Rows, list containers, monitor tiles.
+    static let row: CGFloat = 12
+    /// Large list panes.
+    static let container: CGFloat = 16
+    /// Rounded-square category badges.
+    static let badge: CGFloat = 9
+    /// Checkbox corner.
+    static let checkbox: CGFloat = 5
 }
 
 enum Motion {
-    static let quick = Animation.easeOut(duration: 0.18)
-    static let standard = Animation.spring(response: 0.4, dampingFraction: 0.85)
-    static let canvas = Animation.easeInOut(duration: 0.7)
+    static let quick = Animation.easeOut(duration: 0.15)
+    static let standard = Animation.snappy(duration: 0.25)
+    static let canvas = Animation.smooth(duration: 0.7)
     static let slow = Animation.easeInOut(duration: 1.2)
+
+    // B.7 additions.
+    /// Press-down scale.
+    static let instant = Animation.easeOut(duration: 0.08)
+    /// Hero transform, orb state morph, tile reveal.
+    static let emphasized = Animation.spring(duration: 0.45, bounce: 0.18)
+    /// Canvas re-tint between modules.
+    static let scene = Animation.smooth(duration: 0.7)
+    /// Completion burst / count-up envelope.
+    static let celebrate = Animation.easeOut(duration: 1.2)
+    /// Metric count-up.
+    static let countUp = Animation.easeOut(duration: 0.9)
+    /// Progress ring interpolation to each new value.
+    static let progress = Animation.linear(duration: 0.3)
+    /// Cross-fade used for every transform under Reduce Motion.
+    static let fade = Animation.easeInOut(duration: 0.2)
+
+    /// `animation`, or a 0.2 s cross-fade when Reduce Motion is on (B.7 mapping).
+    static func adaptive(_ animation: Animation, reduceMotion: Bool) -> Animation {
+        reduceMotion ? fade : animation
+    }
+}
+
+/// Ambient-motion policy: the system Reduce Motion setting *or* the app's own
+/// "Reduce ambient motion" preference stops canvas drift, particles and breathing.
+enum PrismAmbient {
+    static func isReduced(_ accessibilityReduceMotion: Bool) -> Bool {
+        accessibilityReduceMotion || SettingsStore.shared.settings.reduceAmbientMotion
+    }
+}
+
+/// Transitions between module phases (B.13.10).
+extension AnyTransition {
+    /// Fade + 8 pt rise; a plain fade under Reduce Motion.
+    static func prismPhase(reduceMotion: Bool) -> AnyTransition {
+        reduceMotion ? .opacity
+            : .asymmetric(insertion: .opacity.combined(with: .offset(y: 8)), removal: .opacity)
+    }
 }

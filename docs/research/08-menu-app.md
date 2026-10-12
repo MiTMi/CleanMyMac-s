@@ -1340,3 +1340,29 @@ All of these are INFERRED design decisions unless marked otherwise.
 - CGS headers: https://github.com/sirg3/CGSInternal (`CGSNotifications.h`, `CGSMisc.h`)
 - networkQuality parser: https://github.com/jtn0123/OpenTaskManager ; https://github.com/macadmins/osquery-extension (`tables/networkquality/networkquality.go`)
 - GitHub code-search excerpts (VERIFIED-X): process listings (OpenAgentsInc/openagents, francescotinti/php-rust), defaults domains (tracycsmith/refineo-laptop-config), cache paths (themoretheless/ppduster), `launchctl bootout` (ArshiaEcho/janitor), Mac mini `powermode` (LouisVasseur/SPLICE), FDA on `~/.Trash` (viniciussouzao/tidymymac, sodadata/tutorial-demo-project), time-sensitive entitlement usage
+
+---
+
+## Addendum (gap-fill)
+
+See `20-gap-04-cmm5-tools-activity-health-notifications.md` (2026-10-12).
+- **§12 gap 8 (Assistant in 5.7):** still open. Its §5.1 tabulates placement by version: X top-right pill → 5.0 bottom-of-sidebar row → 5.4+ Health Score also inside My Activity → `AssistantUI` still shipped in 5.5.4. Its §10 step 4 settles 5.7 with Accessibility Inspector.
+- **§4.12 "My Tools from the Menu":** our hand-off spec is in its §3.7: favourites row plus a Toolbox button, `ourapp://tool/<id>`, and favourites shared through App Group defaults.
+- **§8.3–8.4:** Explain placement per module, panel fields, and behaviour for each `UnavailableReason` are in its §7.
+
+## Addendum (gap-fill)
+
+See `20-gap-06-cmm5-settings-prefkeys-alerts.md` (2026-10-12) for §12 gap 2.
+- **Settings › Menu.** **Enable Menu** maps to `MenuAppEnabled` (bool, main domain; VERIFIED-OSS). **Recommendations** probably maps to `ShowAssistantRecommendations` (INFERRED).
+- **Menu domain.** The `.Menu` defaults domain holds no user settings (Setapp export: only `STP_*` keys).
+- **Alert switches** are in the App Group plist: `SmartCareReminderEnabled`, `TrashSizeAlertsEnabled`.
+- **Thresholds.** No threshold keys were found. The CMM3 threshold popups are recovered with their likely free-space/Trash split (its §3.3). Our Notifications tab rows and defaults are in its §5.3, aligned with §6.2 and §7.2 here.
+
+## Addendum (gap-fill, 20-gap-07)
+
+See `20-gap-07-cmm5-menu-tiles-alerts.md` (2026-10-12) for §12 gaps 1–5 and 7.
+- **Tiles and layout (gap 1):** the KB lists the 5.x monitors in this order: Health, Protection, Storage, Memory, Battery, CPU, Network, Connected Devices. A third-party screenshot description adds a hero "Mac Health" card, glass tiles and a recommendation card. Our grid rule follows the KB order, drops the Battery slot on a Mac mini (or turns it into UPS), and folds external drives into Devices (its §3.3, §4).
+- **Window:** the 5.x Menu is a real window (a tiling-WM rule targets it). The Menu does its own HTTP (it has an HTTPStorages cookie file). The Health Monitor queries CacheDelete, so "available" likely includes purgeable space (its §2 E2–E4).
+- **Icon (gap 4):** INFERRED icon only. No setting for a readout exists in any generation (its §3.1).
+- **Network (gap 3) and devices (gap 5):** still unverified for 5.x. X facts are dated (4.11.2 speed test, 4.11.3 traffic, 4.13.0 connect/disconnect and drives). A mirrored ZDNet piece confirms X's "eject all" and Bluetooth low-battery alerts (its §4.7–4.9).
+- **Alerts (gaps 2, 7):** a merged catalogue with vendor buttons per generation, our triggers, thresholds, actions and snooze model (its §5–§6). The 5.x profiles hold no time-sensitive entitlement. On-device steps to settle notification vs panel, thresholds and layout are in its §9.

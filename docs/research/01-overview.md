@@ -492,3 +492,63 @@ Adversarial fact-check performed 2026-10-12. Constraints: the shared WebSearch b
 **Still uncertain (needs a session with macpaw.com / App Store access or a real Mac running 5.7.1)**
 - Exact 5.7.x sidebar order, icons and the Assistant's placement; the Basic-vs-Plus table and current prices; General/Notifications settings contents and any theme/sound options; first-launch screens; whether an Extensions manager exists in 5.x; Health score cutoffs and the "time saved" formula; the 5.x "Suspicious" definition; release notes for 5.2.10 and 5.6.1; the 5.4.0/5.5.0–5.5.3 dates (missing from Homebrew history); the Mac App Store edition's 2020-04-28 debut date; every MacPaw-KB-only claim (KB-sourced rows in §§4, 5, 8–10), which rest on the original researcher's search-engine extraction.
 - Best next step (INFERRED): install the 5.7.1 trial on the Mac mini, record the sidebar and Settings panes, and dump the bundle (`Contents/Library`, `Contents/PlugIns`, `Info.plist`, `.lproj` string keys for structure only, without copying text) to settle gaps 1, 3, 5 and 6.
+
+---
+
+## Addendum (gap-fill)
+
+See `20-gap-01-cmm5-shell-smartcare-screens.md` (2026-10-12) for the 5.x main window and sidebar. On §14:
+- **Gap 1 (sidebar):** best 5.7 reconstruction in its §4.1. Space Lens, Cloud Cleanup and Tools are confirmed sidebar items. Whether My Activity is a row, and whether Assistant still sits at the bottom, is open.
+- **Gap 5 (first launch):** onboarding is built around `IntroVideo.mp4`, with contextual permission prompts (its §8.1). The step list remains open.
+- Its §9 has a hands-on kit (`plutil` string dump, AX tree, `otool` SDK check) to settle both on the Mac mini.
+
+### From 20-gap-04 (2026-10-12): Tools, Activity, Health, Notifications, Smart Insights, Screen Cleaning
+
+See `20-gap-04-cmm5-tools-activity-health-notifications.md`.
+- **§5.2 one-liners:** that file has:
+  - the reconstructed **25+ tool catalogue** for My Tools (8 vendor-named, the rest INFERRED from 5.x sub-features), with defaults, search and Menu hand-off (its §3);
+  - the **My Activity** metric definitions and a transparent time-saved model (§4);
+  - Health placement by version, card types and our scoring (§5);
+  - the Notification Center spec (§6);
+  - Smart Insights placement, panel layout and unavailable-model behaviour (§7);
+  - a Screen Cleaning build spec (§8).
+- **Gap 4 (Screen Cleaning Mode):** still **unconfirmed**. The 5.5.4 bundle has a squeegee `WiperFrame_1…6` sprite whose use is unknown.
+- **Gap 7 (thresholds, time saved):** still **unpublished**. Proposed rules are in its §4.4 and §5.5.
+- The 5.2.6 Smart Insights note was re-read directly from DevMate. The DevMate feed ends at 5.3.1; 5.4+ notes sit behind `updates.cleanmymac.com`, which is unreachable here.
+
+### From 20-gap-05 (2026-10-12): Email Cleanup (Gmail)
+
+See `20-gap-05-cmm5-email-cleanup.md`. It extends the §5.2 Email Cleanup row with:
+- a full UI state machine, results layout, per-category rows and actions, confirmation and undo copy, and a privacy sheet (its §2–§3);
+- the unsubscribe engine: RFC 2369 order, RFC 8058 one-click POST with the DKIM gate and SSRF guards, and `mailto:` sending (its §4);
+- the Gmail API calls, the single-scope policy (`gmail.modify`; never `gmail.metadata` or `https://mail.google.com/`), the scan pipeline, quotas with an adaptive limiter, and Google OAuth for macOS (ASWebAuthenticationSession + PKCE, iOS-type client; loopback fallback) (its §5–§7).
+
+Vendor screen labels, undo, sign-out, scopes and privacy handling are still a **GAP**. Its §9 lists device checks to settle them.
+
+## Addendum (gap-fill)
+
+See `20-gap-06-cmm5-settings-prefkeys-alerts.md` (2026-10-12) for §10 and §14 gap 3.
+- **Tab list.** The nine-tab strip (General · Scan · Notifications · Menu · [slot] · Protection · Disk Access · Analytics · Ignore List) is a replica of **CleanMyMac X 4.14/4.15**, not 5.x. The probable 5.x set is **General · Scanning · Notifications · Menu · Protection · Ignore List**: five tabs KB-verified, Notifications INFERRED-strong (its §2).
+- **Real 5.x pref keys (Setapp):**
+  - main domain: `MenuAppEnabled`, `ShowAssistantRecommendations`;
+  - App Group plist: `SoundsEnabled`, `CustomThemes`, `SmartCareReminderEnabled`, `TrashSizeAlertsEnabled`, `MalwareScanMode` (`protected`/`manual` = Enable Malware Monitor).
+  - Plus counters and flags from an exported 5.6.0 plist (its §4).
+- **Still open:** threshold keys, and any Business/Jamf profile keys (GAP).
+
+## Addendum (gap-fill, 20-gap-07)
+
+See `20-gap-07-cmm5-menu-tiles-alerts.md` (2026-10-12).
+- **Correction to §2 (4.10.0 row) and line 475:** the fetched DevMate X notes **do** say that Assistant recommendations shown in the Menu are managed in Preferences ("(manage in Preferences)", 4.10.0). Source: https://s3-us-west-2.amazonaws.com/updateinfo.devmate.com/com.macpaw.CleanMyMac4/41508.0.2409290833/releasenotes.html
+- **Timeline addition:** CleanMyMac X 4.15.14 (Dec 2025) added macOS Tahoe support and states that Tahoe is the last macOS version X supports (DevMate `41514.0.2512021236` notes).
+- **§5.2 The Menu row:** per-tile content, Mac mini layout, Devices actions and the alert catalogue are in that file's §3–§6.
+
+## Addendum (gap-fill, 20-gap-08)
+
+See `20-gap-08-cmm5-menus-shortcuts-integrations.md` (2026-10-12): menus, shortcuts, Finder integration, URL scheme, trash prompt, Help/About.
+- **§3.2 Finder Sync row.**
+  - The extension was **running** in a 2026-09-20 process capture, so it is enabled and loaded by Finder. Its containers exist on a 5.6.0 install.
+  - The **Mac App Store edition registers no CleanMyMac Finder Sync, widget, Intents or Share extension** (EtreCheck report, 2026-04 install).
+  - What the extension adds is still **unknown**. Best inference: Finder context-menu entries that hand an app or folder to the main app, succeeding X 4.0.2's "Services menu for Updater and Uninstaller modules" (VERIFIED DevMate).
+- **Exact CleanMyMac 3.9 menu bar** recovered from its compiled `MainMenu.nib`: Go ⌘1–⌘6, Back ⌘[, Scan ↩, Rescan ⌘R, Quick Look ⌘Y, Reveal ⇧⌘R, Launch ⌘↓, Add Folder ⌘O, Window › Ignore List, Help items.
+- **URL schemes:** `cleanmymac://` (3.x licensing routes) and `cleanmymacx://` (X).
+- **Widget row:** the 5.x absence is reinforced by the EtreCheck data.

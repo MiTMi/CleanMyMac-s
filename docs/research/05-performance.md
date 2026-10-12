@@ -1006,3 +1006,16 @@ Adversarial fact-check, 2026-10-12. WebSearch was unavailable (shared budget exh
 - The macOS version that first removed `lsregister -kill` (observed only on 26), and whether `-domain` is still silently accepted.
 - Numeric thresholds for the vendor's high-memory and hung-app alerts.
 - All CMM3 binary findings describe a 2018-era product. Carrying them over to X/5.x is INFERRED, though it is consistent with the 5.x CLI ("no sudo" RAM) and the 26.6 CacheDelete log.
+
+---
+
+## Addendum (gap-fill)
+
+See `20-gap-02-cmm5-cleanup-protection-performance-screens.md` (2026-10-12) §5 for the 5.x Performance screens. It covers:
+- the weekly-maintenance dashboard card with Review / Run Tasks / View All Tasks;
+- the Performance Manager panes;
+- a per-OS task table for macOS 14, 15 and 26: Run Maintenance Scripts is hidden on 14+ per the KB, so §12 gap 6 is answered at medium confidence;
+- the Login and Background Items list layouts and confirmations;
+- the quit-apps dialog.
+
+§12 gaps 1 and 4 are narrowed there, not closed. Other apps' SMAppService items are probably read-only in 5.x. A check on the Mac mini is in its §7.9.

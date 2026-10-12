@@ -1512,3 +1512,31 @@ Status after the fact-check pass (2026-10-12) is given in brackets.
 - Whether a programmatic trash of a host app triggers automatic system-extension removal.
 
 All of these are marked INFERRED or GAP in the body. They need either macpaw.com access or tests on the Mac mini.
+
+## Addendum (gap-fill)
+
+See `20-gap-03-cmm5-applications-clutter-spacelens-cloud.md` §2 (2026-10-12). Summary:
+- **Corrections to §1 item 2 and §3.4.** Real X screenshots show **Unused** in 2020 and in late 4.15 builds, so it is not 5.x-only. **Steam** appears as a *Stores* row when Steam games are installed. A **32-Bit** row existed in 2020 and was later dropped. In 5.x, **Leftovers** is its own pane in the Manage My Applications window, not a filter row.
+- **§10 gaps 1, 4 and 7.** Answered at medium or low confidence: the 5.x tiles, the three-pane manager, the group list, the Leftovers default (one-click Remove, so leftovers are pre-approved) and details of the per-app resource list.
+- **§4.2.4 vs 13 §3.41 (in-place install).** The vendor's Updater installs Sparkle and Custom updates **in-app**, as a progress queue; macOS updates are notify-only. Spruce's rule from now on:
+  - Sparkle apps are updated by driving the target app's own feed through an embedded Sparkle `SPUUpdater` (the Latest pattern), gated on App Management;
+  - App Store and macOS updates are hand-offs;
+  - no custom bundle swap in v1.
+
+## Addendum (gap-fill, 20-gap-08)
+
+See `20-gap-08-cmm5-menus-shortcuts-integrations.md` §7 (2026-10-12) on §3.10, the trash monitor.
+- **Exact CMM3 prompt** (parsed `TrashedAppAlert.nib`):
+  - title "Uninstall applications correctly.";
+  - one row per trashed app: icon, name, related-files count, size;
+  - **Uninstall Completely** (↩) runs the removal *inside the alert* (Progress, Done and Failure tabs);
+  - **View in CleanMyMac** hands off to the Uninstaller;
+  - **Dismiss** (Esc) is wired to `ignoreForever:`.
+- **Watched folders:** `~/.Trash`, per-volume `.Trashes` and an iCloud-style `Documents/.Trash/`.
+- 5.x moves the offer to the Health Monitor; its presentation is unknown.
+- **Our spec** adds these rules (its §7.4):
+  - suppress when the same bundle ID is still installed elsewhere, so shared data is never offered;
+  - withdraw the prompt on Put Back;
+  - batch apps trashed together;
+  - plain dismissal is not a silent "ignore forever".
+- **Drop targets:** X fixed Uninstaller drag-and-drop in 4.0.2 and 4.5.3 (VERIFIED DevMate). Both CMM3 and X accept any file on the Dock icon (`CFBundleDocumentTypes` "AnyFile").

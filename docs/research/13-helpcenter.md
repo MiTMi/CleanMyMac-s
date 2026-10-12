@@ -1301,3 +1301,25 @@ So nothing here re-reads macpaw.com. Every check went to package metadata, MacPa
 - Which macOS first removed `lsregister -kill`: observed on 26 only. Detect at runtime.
 - Whether CMM5 ships the Moonlock ES extension: unresolved; check `systemextensionsctl list | grep -i macpaw` on a real install.
 - 13 is the language count in the appcast's release-notes links. The app bundle's `.lproj` list was not inspected.
+
+## Addendum (gap-fill)
+
+See `20-gap-03-cmm5-applications-clutter-spacelens-cloud.md` §2.8 (2026-10-12).
+- **§3.41's line "we never replace bundles ourselves" is superseded.**
+  - Evidence: the vendor installs Sparkle and Custom updates in-app (X 4.0.1/4.1.0 notes and a 2020 "Updating 8 applications" screenshot).
+  - Spruce updates Sparkle apps through an embedded Sparkle `SPUUpdater`, which does its own EdDSA and code-signature checks and the atomic replace. This needs App Management.
+  - App Store and macOS updates stay hand-offs.
+- **Still open from the §7 FAQ:** whether 5.x updates App Store apps in-app.
+
+See also `20-gap-04-cmm5-tools-activity-health-notifications.md` (2026-10-12) for §3.2 (My Tools) and §3.3 (Mac Health):
+- the full Toolbox catalogue, default favourites and search rules (its §3);
+- Health band reconciliation with the bundle's six gauge states, card catalogue and scoring (its §5).
+
+Health cutoffs remain unpublished.
+
+## Addendum (gap-fill)
+
+See `20-gap-06-cmm5-settings-prefkeys-alerts.md` (2026-10-12) for §3.28 and §12 item 4.
+- The weak nine-tab list is CleanMyMac **X 4.14/4.15**. The probable 5.x tabs are General · Scanning · Notifications · Menu · Protection · Ignore List.
+- 5.x preference keys and domains, and a toggle-diff procedure to settle the remaining controls on a real Mac, are in its §4 and §7.
+- §11 item 3's tab list is our proposal and is superseded by its §5.3.

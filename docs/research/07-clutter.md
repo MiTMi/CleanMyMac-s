@@ -1645,3 +1645,22 @@ func withoutMaterialization<T>(_ body: () throws -> T) rethrows -> T {
    - the File Provider TCC prompt with and without FDA;
    - Vision rev-2 threshold calibration.
 8. The Gemini 2 manual PDF, the MacPaw KB pages, and the Behance/Dribbble case studies remain unreachable from this environment. Re-fetch them when web access returns.
+
+## Addendum (gap-fill)
+
+See `20-gap-03-cmm5-applications-clutter-spacelens-cloud.md` §§3–5 (2026-10-12). Summary:
+- **My Clutter:**
+  - dashboard headline grammar is "‹count or size› ‹category› Found";
+  - the Review All Files manager has three panes and facets;
+  - the duplicate keep rule and the Similar Images default are still undocumented;
+  - late X removed files **permanently** in Space Lens and Large & Old.
+- **Space Lens (5.x):**
+  - bubble states (Default / Hover / Selected / Selected-Hover) with fills tinted at runtime;
+  - a dedicated **"Smaller Items"** aggregate bubble;
+  - a **"Clouds"** bubble state;
+  - the bottom gauge marks the selected size;
+  - the Review Selected flow is confirmed.
+- **Cloud Cleanup:** this revises §10.1 and §17.4.
+  - The vendor model is **hybrid**: iCloud is local; Google Drive uses browser OAuth and the Drive API, works without Drive for desktop, supports several accounts and shows quota; OneDrive and Dropbox probably use APIs too.
+  - Verified iCloud result groups: "Locally synced files", "Large locally synced files", "Large cloud files".
+  - The actions are **Remove** and **Unsync**.

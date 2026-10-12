@@ -1794,3 +1794,14 @@ Adversarial fact-check pass, 2026-10-12.
 - whether our SMAppService daemon is charged to our app for App Management;
 - Music/TV media-folder relocation handling;
 - OnyX's categories and fresh reviewer data points: still not collected, for the same network reasons.
+
+---
+
+## Addendum (gap-fill)
+
+See `20-gap-02-cmm5-cleanup-protection-performance-screens.md` (2026-10-12) for the 5.x Cleanup screens: landing, results cards, the three-pane Cleanup Manager, the quit-apps dialog and completion. It addresses §12 gaps 1, 4 and 5 as follows:
+- **Gap 1:** still only Spotify and Gradle are known from the 5.x KB. Other documented never-auto rules are consolidated in its §3.6, with an on-device check in §7.
+- **Gap 4:** Unused Disk Images, Old Updates and Downloads are not 5.x System Junk groups. Dev Tools and AI Junk exist in the CLI only.
+- **Gap 5:** the Trash Bins module pre-checks every trash (startup, external drives, Mail, Photos). Smart Care's external-trash default is still unconfirmed.
+
+New evidence there: real CleanMyMac X screenshots (dora-ai routes 2–4, e.g. 3.46 GB found vs 1.91 GB smart-selected) and a 5.5.4-based third-party replica (VaderCleaner).
