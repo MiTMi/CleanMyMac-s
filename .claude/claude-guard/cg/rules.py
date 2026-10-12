@@ -134,10 +134,12 @@ RULES = [
       r"\.npmrc|\.pypirc|\.netrc\b", EXECUTABLE | {"desc"}, (".npmrc", ".pypirc", ".netrc"), False,
       "Normal for HTTP/registry clients; npm worms steal these tokens to spread."),
     R("CRED-KEYCHAIN", "HIGH", "Reads the macOS Keychain",
-      r"security\s+(find-(generic|internet)-password|dump-keychain|export)\b"
-      r"|SecItemCopyMatching|kSecReturnData",
-      EXECUTABLE, ("security", "secitemcopy", "ksecreturndata"), True,
+      r"\bsecurity\s+(find-(generic|internet)-password|dump-keychain|export)\b",
+      EXECUTABLE, ("security",), True,
       "Keychain dumping is the core of macOS infostealers."),
+    R("KEYCHAIN-API", "MEDIUM", "Reads Keychain items via the Security framework",
+      r"\b(SecItemCopyMatching|kSecReturnData)\b", {"code"}, ("secitemcopy", "ksecreturndata"), False,
+      "Normal for apps storing their own secrets; unexpected in an MCP server or skill.", flags=0),
     R("CRED-BROWSER", "CRITICAL", "Reads browser passwords / cookies / wallets",
       r"(Google/Chrome|BraveSoftware|Microsoft Edge|Arc/User Data|Chromium)[^\n]{0,80}"
       r"(Login Data|Cookies|Local State|Web Data)|logins\.json|key4\.db"
@@ -167,10 +169,14 @@ RULES = [
     # --------------------------------------------------- persistence / evasion
     R("PERSIST-LAUNCHD", "HIGH", "Installs a LaunchAgent/Daemon or cron job",
       r"Library/Launch(Agents|Daemons)|launchctl\s+(load|bootstrap|submit)|crontab\s+(-l|-)"
-      r"|/etc/periodic/|SMLoginItemSetEnabled|make\s+(new\s+)?login\s+item",
+      r"|/etc/periodic/|make\s+(new\s+)?login\s+item",
       {"code", "shell", "instr"}, ("launchagents", "launchdaemons", "launchctl",
-                                   "crontab", "periodic", "smloginitem", "login item"), False,
+                                   "crontab", "periodic", "login item"), False,
       "Makes code survive reboots outside of Claude's control."),
+    R("PERSIST-API", "MEDIUM", "Uses macOS login-item / privileged-helper APIs",
+      r"\b(SMLoginItemSetEnabled|SMAppService|SMJobBless)\b", {"code"},
+      ("smloginitem", "smappservice", "smjobbless"), False,
+      "Normal for Mac apps with helpers; unexpected in an MCP server or skill.", flags=0),
     R("PERSIST-SHELLRC", "HIGH", "Modifies shell startup files",
       r"(>>|appendFile\w*\(|open\([^)]*['\"]a['\"])[^\n]{0,120}\.(zshrc|zprofile|bashrc|bash_profile|profile)\b",
       {"code", "shell"}, ("zshrc", "zprofile", "bashrc", "bash_profile", "profile"), False,
