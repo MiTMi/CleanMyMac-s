@@ -416,6 +416,7 @@ public enum ProtectionMetaKey {
 
     public static let malwareTool = "malware"
     public static let privacyTool = "privacy"
+    public static let permissionsTool = "permissions"
 }
 
 /// Group ids of the malware review list.

@@ -520,6 +520,8 @@ public enum ProtectionPrivacyMetaKey {
     public static let kind = "privacy.kind"
     public static let files = "privacy.files"
     public static let action = "privacy.action"
+    /// "1" when the browser was open at scan time (it must be quit before cleaning).
+    public static let running = "privacy.running"
 }
 
 /// What cleaning one selected privacy item involves, decoded from its metadata.
