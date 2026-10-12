@@ -135,6 +135,12 @@ public struct ActivityRecommendation: Identifiable, Equatable, Sendable {
         self.isSystem = isSystem
     }
 
+    /// True when the card has a button.
+    public var isActionable: Bool {
+        if case .none = action { return false }
+        return !actionTitle.isEmpty
+    }
+
     /// Module the action opens, if any.
     public var targetModule: ModuleID? {
         if case .open(let module, _) = action { return module }

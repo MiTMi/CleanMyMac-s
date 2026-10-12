@@ -148,6 +148,9 @@ final class ActivityHealthTests: XCTestCase {
         XCTAssertFalse(issues[0].isCritical)
         XCTAssertEqual(issues[0].penalty, 20)
         XCTAssertTrue(ActivityHealth.systemIssues(from: snap, lowDiskThresholdPercent: 5).allSatisfy { $0.kind != "disk" })
+        let battery = ActivityHealth.recommendation(for: issues[1])
+        XCTAssertFalse(battery.isActionable)
+        XCTAssertTrue(ActivityHealth.recommendation(for: issues[0]).isActionable)
         // Desktop Macs have no battery: nothing is reported for it.
         snap.batteryHealth = nil
         XCTAssertFalse(ActivityHealth.systemIssues(from: snap).contains { $0.kind == "battery" })
