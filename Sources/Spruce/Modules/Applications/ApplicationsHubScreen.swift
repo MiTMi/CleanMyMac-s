@@ -263,7 +263,7 @@ struct ApplicationsUpdatesTile: View {
         let homebrew = pending.filter(\.isUnattended)
         ApplicationsHubTile(symbol: "arrow.down.circle", title: "Updates", metric: metric(pending.count),
                             caption: caption(pending.count), status: status(pending.count),
-                            isWorking: screen.updatesPhase == .loading,
+                            isWorking: screen.updatesPhase == .loading || screen.isInstallingUpdates,
                             onOpen: { screen.open(.updater) }) {
             if !pending.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
