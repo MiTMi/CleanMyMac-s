@@ -1,0 +1,28 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ \"$CLAUDE_CODE_REMOTE\" = \"true\" ] || exit 0; python3 \"$CLAUDE_PROJECT_DIR/.claude/claude-guard/guard.py\" hook session-start",
+            "timeout": 60
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "^(Bash|Write|Edit|MultiEdit|Skill)$|^mcp__",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ \"$CLAUDE_CODE_REMOTE\" = \"true\" ] || exit 0; python3 \"$CLAUDE_PROJECT_DIR/.claude/claude-guard/guard.py\" hook pre-tool-use",
+            "timeout": 90
+          }
+        ]
+      }
+    ]
+  }
+}
