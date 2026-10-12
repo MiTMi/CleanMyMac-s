@@ -86,14 +86,37 @@ public enum Permissions {
 }
 
 /// Posts local user notifications (low disk, threats, updates…).
+///
+/// Pass `module` (a `ModuleID` raw value) and optionally `tool` (a tool id) to give the
+/// notification a "Review" button; clicking the notification or the button posts
+/// `Notifier.openRequest` with those values so the app can navigate there.
 public enum Notifier {
-    public static func post(id: String, title: String, body: String) {
+    public static let reviewCategory = "app.spruce.review"
+    public static let reviewAction = "app.spruce.review.open"
+    /// Posted on the main thread with userInfo ["module": String, "tool": String?].
+    public static let openRequest = Notification.Name("app.spruce.notifier.openRequest")
+
+    public static func post(id: String, title: String, body: String, module: String? = nil, tool: String? = nil) {
         guard Bundle.main.bundleIdentifier != nil else { return }
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body
         content.sound = .default
+        if let module {
+            var info: [String: String] = ["module": module]
+            if let tool { info["tool"] = tool }
+            content.userInfo = info
+            content.categoryIdentifier = reviewCategory
+        }
         let request = UNNotificationRequest(identifier: id, content: content, trigger: nil)
         UNUserNotificationCenter.current().add(request)
+    }
+
+    /// Registers the "Review" action. Call once at launch.
+    public static func registerCategories() {
+        guard Bundle.main.bundleIdentifier != nil else { return }
+        let review = UNNotificationAction(identifier: reviewAction, title: "Review", options: [.foreground])
+        let category = UNNotificationCategory(identifier: reviewCategory, actions: [review], intentIdentifiers: [], options: [])
+        UNUserNotificationCenter.current().setNotificationCategories([category])
     }
 }

@@ -22,7 +22,14 @@ final class MonitorAlertCenter {
         let alerts = engine.evaluate(sample, settings: settings)
         guard !alerts.isEmpty else { return }
         for alert in alerts {
-            Notifier.post(id: alert.id, title: alert.title, body: alert.body)
+            let target: (module: ModuleID, tool: String?)
+            switch alert.kind {
+            case .lowDisk: target = (.cleanup, "cleanup.systemJunk")
+            case .trashSize: target = (.cleanup, "cleanup.trash")
+            case .memoryPressure, .highCPUApp: target = (.performance, "performance.consumers")
+            }
+            Notifier.post(id: alert.id, title: alert.title, body: alert.body,
+                          module: target.module.rawValue, tool: target.tool)
         }
         try? store.save(engine.state)
     }

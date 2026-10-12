@@ -183,7 +183,7 @@ public final class ProtectionRealtimeMonitor: @unchecked Sendable {
         for event in visible {
             if settings.notifyThreats {
                 Notifier.post(id: "app.spruce.protection.realtime.\(event.id.uuidString)", title: event.notificationTitle,
-                              body: event.notificationBody)
+                              body: event.notificationBody, module: ModuleID.protection.rawValue, tool: "protection.malware")
             }
             if event.isThreat {
                 HistoryStore.shared.record(ActivityEntry(module: .protection, kind: .other, count: 1,

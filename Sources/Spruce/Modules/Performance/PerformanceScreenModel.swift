@@ -468,7 +468,7 @@ final class PerformanceScreenModel {
     private func finishAction(_ outcome: RunOutcome, ids: Set<String>, removing: Bool) {
         busyItemIDs.subtract(ids)
         if removing && outcome.processedCount > 0 {
-            HistoryStore.shared.record(outcome, kind: .other)
+            HistoryStore.shared.record(outcome, kind: .startupItems)
         }
         if removing { selectedStartupIDs.subtract(outcome.removedItemIDs) }
         if let first = outcome.failures.first {

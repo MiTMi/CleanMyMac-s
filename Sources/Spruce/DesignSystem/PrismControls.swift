@@ -362,13 +362,17 @@ struct PrismScanStep: Identifiable, Equatable {
     var state: State
     /// Tints the step's icon; nil uses the screen's module.
     var module: ModuleID?
+    /// Status text while `.running` (defaults to "Checking…"; e.g. "Cleaning…" during a run).
+    var runningLabel: String?
 
-    init(id: String, title: String, symbol: String, state: State = .waiting, module: ModuleID? = nil) {
+    init(id: String, title: String, symbol: String, state: State = .waiting, module: ModuleID? = nil,
+         runningLabel: String? = nil) {
         self.id = id
         self.title = title
         self.symbol = symbol
         self.state = state
         self.module = module
+        self.runningLabel = runningLabel
     }
 }
 
@@ -424,7 +428,7 @@ private struct PrismScanStepRow: View {
     private var statusText: String {
         switch step.state {
         case .waiting: return "Waiting"
-        case .running: return "Checking…"
+        case .running: return step.runningLabel ?? "Checking…"
         case .done(let result): return result
         case .skipped(let reason): return reason
         case .failed(let reason): return reason

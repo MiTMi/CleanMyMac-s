@@ -89,7 +89,7 @@ enum CheckupStepMapping {
         case .skipped: state = .skipped("Not run")
         }
         return PrismScanStep(id: step.module.rawValue, title: step.module.title, symbol: step.module.palette.symbol,
-                             state: state, module: step.module)
+                             state: state, module: step.module, runningLabel: "Working…")
     }
 
     /// "2.4 GB", "12 items", "Done", with a marker when some items failed.

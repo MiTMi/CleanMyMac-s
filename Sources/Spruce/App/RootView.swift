@@ -119,6 +119,9 @@ struct SidebarRail: View {
                     .font(.system(size: 13, weight: selected ? .semibold : .regular))
                     .foregroundStyle(selected ? Ink.primary : Ink.secondary)
                 Spacer()
+                if module == .checkup {
+                    SidebarCheckupBadge()
+                }
             }
             .padding(.horizontal, Spacing.m)
             .padding(.vertical, 7)
@@ -134,5 +137,20 @@ struct SidebarRail: View {
         .buttonStyle(.plain)
         .padding(.horizontal, Spacing.xs)
         .animation(Motion.standard, value: model.selection)
+    }
+}
+
+/// Small live progress ring on the Checkup rail item while a Checkup scan or run is busy.
+private struct SidebarCheckupBadge: View {
+    private var session: CheckupSession { CheckupSession.shared }
+
+    var body: some View {
+        if session.isBusy {
+            ProgressRing(progress: session.displayedFraction > 0 ? session.displayedFraction : nil,
+                         module: .checkup, lineWidth: 2)
+                .frame(width: 14, height: 14)
+                .help("Checkup in progress")
+                .transition(.opacity)
+        }
     }
 }

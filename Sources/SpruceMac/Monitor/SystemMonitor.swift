@@ -71,10 +71,11 @@ public final class SystemMonitor: @unchecked Sendable {
     public private(set) var isFreeingMemory = false
     public private(set) var isEmptyingTrash = false
 
-    /// Alert when one app keeps a core busy (≥ 80 % for 2 min). Stored here because
-    /// `SpruceSettings` has no field for it yet.
-    public var notifyHighCPU: Bool = SystemMonitor.loadHighCPUPreference() {
-        didSet { UserDefaults.standard.set(notifyHighCPU, forKey: Self.highCPUAlertKey) }
+    /// Alert when one app keeps a core busy (≥ 80 % for 2 min). Backed by
+    /// `SpruceSettings.notifyHighCPU` so Settings and the menu share one switch.
+    public var notifyHighCPU: Bool {
+        get { SettingsStore.shared.settings.notifyHighCPU }
+        set { SettingsStore.shared.settings.notifyHighCPU = newValue }
     }
 
     // MARK: Private
@@ -88,10 +89,15 @@ public final class SystemMonitor: @unchecked Sendable {
     @ObservationIgnored private var alertCenter = MonitorAlertCenter()
     @ObservationIgnored private var latestProcesses: [MonitorProcessUsage] = []
 
-    public init() {}
+    public init() {
+        Self.migrateHighCPUPreference()
+    }
 
-    private static func loadHighCPUPreference() -> Bool {
-        (UserDefaults.standard.object(forKey: highCPUAlertKey) as? Bool) ?? true
+    /// One-time migration of the pre-settings preference.
+    private static func migrateHighCPUPreference() {
+        guard let old = UserDefaults.standard.object(forKey: highCPUAlertKey) as? Bool else { return }
+        SettingsStore.shared.settings.notifyHighCPU = old
+        UserDefaults.standard.removeObject(forKey: highCPUAlertKey)
     }
 
     // MARK: Lifecycle

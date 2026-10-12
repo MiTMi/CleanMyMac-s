@@ -43,6 +43,7 @@ public final class FileRemover: @unchecked Sendable {
         var removed: [String] = []
         var failures: [ItemFailure] = []
         var needsRoot: [ScanItem] = []
+        var needsRootTrash: [ScanItem] = []
         let candidates = items.filter { $0.deletion != .custom && $0.url != nil }
 
         for (index, item) in candidates.enumerated() {
@@ -90,6 +91,8 @@ public final class FileRemover: @unchecked Sendable {
                     || (ns.domain == NSPOSIXErrorDomain && (ns.code == Int(EPERM) || ns.code == Int(EACCES)))
                 if permission && escalate && item.deletion == .remove {
                     needsRoot.append(item)
+                } else if permission && escalate && item.deletion == .trash {
+                    needsRootTrash.append(item)
                 } else {
                     failures.append(ItemFailure(itemID: item.id, title: item.title, reason: error.localizedDescription))
                     log.record(module: module, action: item.deletion.rawValue, result: "error", detail: "\(url.path) — \(error.localizedDescription)")
@@ -101,7 +104,7 @@ public final class FileRemover: @unchecked Sendable {
             progress?(ScanProgress(fraction: nil, message: "Waiting for administrator approval…", bytesFound: freed))
             let paths = needsRoot.compactMap { $0.url?.path }
             do {
-                try await PrivilegedRunner.shared.removePaths(paths, guardian: guardian)
+                try await PrivilegedRunner.shared.removePaths(paths, guardian: guardian, options: options)
                 for item in needsRoot {
                     guard let path = item.url?.path else { continue }
                     if FileWalker.entry(at: path) == nil {
@@ -114,6 +117,28 @@ public final class FileRemover: @unchecked Sendable {
                 }
             } catch {
                 for item in needsRoot {
+                    failures.append(ItemFailure(itemID: item.id, title: item.title, reason: error.localizedDescription))
+                }
+            }
+        }
+
+        if !needsRootTrash.isEmpty {
+            progress?(ScanProgress(fraction: nil, message: "Waiting for administrator approval…", bytesFound: freed))
+            let paths = needsRootTrash.compactMap { $0.url?.path }
+            do {
+                let moved = try await PrivilegedRunner.shared.trashPaths(paths, guardian: guardian, options: options)
+                for item in needsRootTrash {
+                    guard let path = item.url?.path else { continue }
+                    if let destination = moved[path] {
+                        freed += item.size
+                        removed.append(item.id)
+                        log.record(module: module, action: "trash-admin", result: "ok", bytes: item.size, detail: "\(path) -> \(destination)")
+                    } else {
+                        failures.append(ItemFailure(itemID: item.id, title: item.title, reason: "Could not be moved to the Trash, even as administrator"))
+                    }
+                }
+            } catch {
+                for item in needsRootTrash {
                     failures.append(ItemFailure(itemID: item.id, title: item.title, reason: error.localizedDescription))
                 }
             }

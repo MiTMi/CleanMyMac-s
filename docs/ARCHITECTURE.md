@@ -85,6 +85,7 @@ that tool, and set `model.pendingTool = nil`. Tool ids:
 
 | Module | Tool ids |
 |---|---|
+| Checkup | `checkup.scan` (starts a scan when idle) |
 | Cleanup | `cleanup.systemJunk`, `cleanup.mailAttachments`, `cleanup.trash` |
 | Protection | `protection.malware`, `protection.privacy`, `protection.permissions` |
 | Performance | `performance.maintenance`, `performance.loginItems`, `performance.backgroundItems`, `performance.consumers` |
@@ -100,6 +101,29 @@ Each `CheckupContributor` keeps the reviewable result of its last `checkupScan` 
 `checkupReview: [ScanGroup]` (selection editable from the Checkup review sheet);
 `checkupRun` acts only on the *selected* items in `checkupReview`. Default selection
 follows the safety rules below.
+
+## Integration notes (from finished modules — read if you build Settings, Onboarding, Toolbox or Activity)
+
+* **Admin Trash:** `PrivilegedRunner.trashPaths(_:guardian:options:)` moves root-owned items
+  into the user's Trash (one prompt); `FileRemover.dispose(..., escalate: true)` now uses it
+  automatically for `.trash` items that fail with a permission error, and passes its
+  `options` to `removePaths` for `.remove` items. `/usr/bin/tccutil` is an allowed admin tool.
+* **Alerts:** `Notifier.post(id:title:body:module:tool:)` adds a "Review" action that opens
+  `module`/`tool` (routed by the AppDelegate). `AppModel.shared` is the single app model.
+* **History kinds:** `ActivityEntry.Kind.checkup` is a zero-byte marker for a whole Checkup
+  run (bytes live on the per-module entries with the same date — don't count it twice);
+  `.startupItems` = login/background items turned off or removed.
+* **Settings fields to expose:** `SpruceSettings.notifyHighCPU` (Notifications tab; the
+  menu bar bell toggles the same value). Protection scan depth: show
+  `ProtectionScanDepth.allCases` with `.title`, `.coverage`, `.speed`, `.purpose` (stored as
+  "quick" / "balanced" / "deep" in `SpruceSettings.scanDepth`).
+* **Onboarding** must call `Permissions.requestNotificationAuthorization()` (monitor and
+  protection alerts are invisible until authorised).
+* **Toolbox:** Free Up RAM / Flush DNS should call
+  `model.performance.runTasks([.freeRAM], progress:)` / `runTasks([.flushDNS], progress:)`
+  (never throws; `PerformanceRunSummary.outcome(_:)` converts results to a `RunOutcome`).
+* **Health score:** reuse `SystemMonitor.shared.health` / `MonitorHealth.assess(_:context:)`
+  (SpruceCore/Monitor) so the app and the menu bar show the same score.
 
 ## Safety rules (non-negotiable)
 

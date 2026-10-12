@@ -11,6 +11,9 @@ import SpruceMac
 @MainActor
 @Observable
 final class AppModel {
+    /// The app's single model (also reachable from AppKit callbacks such as notifications).
+    static let shared = AppModel()
+
     var selection: ModuleID = .checkup
     /// Set by any view to request navigation to a module and (optionally) a sub-tool.
     var pendingTool: String?
@@ -31,10 +34,10 @@ final class AppModel {
 
     init() {}
 
-    /// Engines contributing to Checkup, in tile order, filtered by settings.
+    /// Every engine that can contribute to Checkup, in tile order. Checkup itself applies
+    /// `settings.checkupModules` (it needs the full list for "Include" / "Try Again").
     var checkupContributors: [CheckupContributor] {
-        let all: [CheckupContributor] = [cleanup, protection, performance, applications, clutter]
-        return all
+        [cleanup, protection, performance, applications, clutter]
     }
 
     func refreshPermissions() {

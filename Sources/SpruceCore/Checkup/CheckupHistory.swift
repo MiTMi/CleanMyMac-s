@@ -30,7 +30,7 @@ public struct CheckupLastSummary: Equatable, Sendable {
 /// * A scan adds one `.scan` entry for `.checkup` (bytes found, action count).
 /// * A run adds one entry per module that did something, attributed to that module
 ///   with the module's natural kind (so per-module statistics stay correct), plus a
-///   `.other` marker entry for `.checkup` with **zero bytes** (so totals are never
+///   `.checkup` marker entry (`.other` in older histories) for `.checkup` with **zero bytes** (so totals are never
 ///   counted twice). All entries of one run share the same date.
 public enum CheckupHistory {
     /// Entries of one run are matched to their marker within this window (dates are
@@ -64,7 +64,7 @@ public enum CheckupHistory {
                                          bytes: max(0, outcome.freedBytes), count: max(0, outcome.processedCount),
                                          summary: "Checkup · \(summary)"))
         }
-        entries.append(ActivityEntry(date: date, module: .checkup, kind: .other, bytes: 0,
+        entries.append(ActivityEntry(date: date, module: .checkup, kind: .checkup, bytes: 0,
                                      count: board.processedCount, summary: "Checkup run · " + CheckupCopy.runSummary(board)))
         return entries
     }
@@ -72,7 +72,7 @@ public enum CheckupHistory {
     /// Summary of the most recent Checkup scan and run, or nil when there was none.
     public static func lastSummary(in history: ActivityHistory) -> CheckupLastSummary? {
         let scan = history.entries.last { $0.module == .checkup && $0.kind == .scan }
-        let marker = history.entries.last { $0.module == .checkup && $0.kind == .other }
+        let marker = history.entries.last { $0.module == .checkup && ($0.kind == .checkup || $0.kind == .other) }
         guard scan != nil || marker != nil else { return nil }
         var summary = CheckupLastSummary()
         if let scan {

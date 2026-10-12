@@ -121,6 +121,8 @@ public struct SpruceSettings: Codable, Equatable, Sendable {
     public var notifyLowDisk: Bool = true
     public var lowDiskThresholdPercent: Int = 10
     public var notifyHighMemory: Bool = true
+    /// Alert when one app keeps a core busy for minutes.
+    public var notifyHighCPU: Bool = true
     public var notifyTrashSize: Bool = true
     public var trashSizeThreshold: Int64 = 2_000_000_000
     public var notifyUpdates: Bool = true
@@ -154,6 +156,7 @@ public struct SpruceSettings: Codable, Equatable, Sendable {
         notifyLowDisk = v(.notifyLowDisk, notifyLowDisk)
         lowDiskThresholdPercent = v(.lowDiskThresholdPercent, lowDiskThresholdPercent)
         notifyHighMemory = v(.notifyHighMemory, notifyHighMemory)
+        notifyHighCPU = v(.notifyHighCPU, notifyHighCPU)
         notifyTrashSize = v(.notifyTrashSize, notifyTrashSize)
         trashSizeThreshold = v(.trashSizeThreshold, trashSizeThreshold)
         notifyUpdates = v(.notifyUpdates, notifyUpdates)
@@ -193,6 +196,10 @@ public struct SpruceSettings: Codable, Equatable, Sendable {
 public struct ActivityEntry: Codable, Hashable, Sendable, Identifiable {
     public enum Kind: String, Codable, Sendable {
         case scan, clean, malwareScan, threatRemoved, maintenance, uninstall, update, cloudFreed, other
+        /// Marker for a whole Checkup run (bytes are recorded on the per-module entries).
+        case checkup
+        /// Login/background items turned off or removed.
+        case startupItems
     }
 
     public var id: UUID

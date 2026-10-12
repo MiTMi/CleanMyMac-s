@@ -124,7 +124,7 @@ final class CheckupHistoryTests: XCTestCase {
         XCTAssertEqual(entries[0].kind, .clean)
         XCTAssertEqual(entries[0].summary, "Checkup · Cleaned 120 items")
         XCTAssertEqual(entries[1].summary, "Checkup · Freed 200 MB · 4 items handled")
-        XCTAssertEqual(entries[2].kind, .other)
+        XCTAssertEqual(entries[2].kind, .checkup)
         XCTAssertEqual(entries[2].bytes, 0)
         XCTAssertEqual(entries[2].count, 124)
 

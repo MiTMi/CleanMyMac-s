@@ -20,7 +20,6 @@ public final class PrivilegedRunner: @unchecked Sendable {
         case reindexSpotlight
         case runPeriodicScripts
         case thinTimeMachineSnapshots
-        case rebuildLaunchServices
         case clearFontCaches
         case repairHomePermissions
         case emptySystemTrashes
@@ -39,8 +38,6 @@ public final class PrivilegedRunner: @unchecked Sendable {
             case .thinTimeMachineSnapshots:
                 // Ask the system to reclaim up to 1 TB of purgeable snapshot space, urgency 4 (highest).
                 return "/usr/bin/tmutil thinlocalsnapshots / 999999999999 4"
-            case .rebuildLaunchServices:
-                return "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -kill -r -domain local -domain system -domain user"
             case .clearFontCaches:
                 return "/usr/bin/atsutil databases -remove"
             case .repairHomePermissions:
@@ -66,7 +63,7 @@ public final class PrivilegedRunner: @unchecked Sendable {
     public static let allowedExecutables: Set<String> = [
         "/bin/launchctl", "/usr/bin/tmutil", "/usr/sbin/sfltool", "/usr/bin/profiles",
         "/usr/bin/mdutil", "/usr/bin/killall", "/bin/kill", "/usr/sbin/purge",
-        "/usr/bin/dscacheutil", "/usr/bin/pkgutil", "/usr/bin/log",
+        "/usr/bin/dscacheutil", "/usr/bin/pkgutil", "/usr/bin/log", "/usr/bin/tccutil",
     ]
 
     /// One root command invocation.
@@ -101,16 +98,58 @@ public final class PrivilegedRunner: @unchecked Sendable {
 
     /// Removes root-owned paths. Every path is re-checked with `PathGuard` (permanent
     /// removal semantics) and must not be a symlink-escaped location.
-    public func removePaths(_ paths: [String], guardian: PathGuard = PathGuard()) async throws {
+    public func removePaths(_ paths: [String], guardian: PathGuard = PathGuard(),
+                            options: PathGuard.Options = []) async throws {
         var safe: [String] = []
         for path in paths {
-            let verdict = guardian.check(path, method: .remove)
+            let verdict = guardian.check(path, method: .remove, options: options)
             guard verdict.isAllowed else { throw SpruceError.blockedPath(path) }
             safe.append(path)
         }
         guard !safe.isEmpty else { return }
         let script = safe.map { "/bin/rm -rf -- \(Self.shellQuote($0))" }.joined(separator: "; ")
         try await runAsAdministrator(script)
+    }
+
+    /// Moves root-owned items into the current user's Trash with one administrator
+    /// prompt, then gives them to the user so the Trash can be emptied normally.
+    /// Every path must pass `PathGuard` with `.trash` and `options`. Existing Trash
+    /// entries are never overwritten (a numbered name is used instead).
+    /// - Returns: the Trash location of each moved path.
+    @discardableResult
+    public func trashPaths(_ paths: [String], guardian: PathGuard = PathGuard(),
+                           options: PathGuard.Options = []) async throws -> [String: String] {
+        let trash = (NSHomeDirectory() as NSString).appendingPathComponent(".Trash")
+        var plan: [(source: String, destination: String)] = []
+        var taken = Set<String>()
+        for path in paths {
+            let verdict = guardian.check(path, method: .trash, options: options)
+            guard verdict.isAllowed else { throw SpruceError.blockedPath(path) }
+            let name = (path as NSString).lastPathComponent
+            let base = (name as NSString).deletingPathExtension
+            let ext = (name as NSString).pathExtension
+            var destination = (trash as NSString).appendingPathComponent(name)
+            var counter = 2
+            while FileWalker.entry(at: destination) != nil || taken.contains(destination) {
+                let candidate = ext.isEmpty ? "\(base) \(counter)" : "\(base) \(counter).\(ext)"
+                destination = (trash as NSString).appendingPathComponent(candidate)
+                counter += 1
+            }
+            taken.insert(destination)
+            plan.append((path, destination))
+        }
+        guard !plan.isEmpty else { return [:] }
+        let owner = "\(getuid()):\(getgid())"
+        let script = plan.map { move in
+            "/bin/mv -n -- \(Self.shellQuote(move.source)) \(Self.shellQuote(move.destination)) && " +
+            "/usr/sbin/chown -R \(owner) \(Self.shellQuote(move.destination))"
+        }.joined(separator: "; ")
+        try await runAsAdministrator(script)
+        var moved: [String: String] = [:]
+        for move in plan where FileWalker.entry(at: move.source) == nil && FileWalker.entry(at: move.destination) != nil {
+            moved[move.source] = move.destination
+        }
+        return moved
     }
 
     /// Single-quote shell escaping: 'it'\''s'.
