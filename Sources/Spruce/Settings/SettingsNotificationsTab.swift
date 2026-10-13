@@ -3,13 +3,19 @@ import SpruceCore
 import SpruceMac
 import SwiftUI
 
-/// Notifications: permission status, alert toggles with thresholds, the weekly reminder
-/// and the temperature unit used by the monitor.
+/// Notifications: permission status, alert toggles with thresholds, the app offers, the
+/// Checkup reminder (interval and time of day) and the temperature unit the menu bar
+/// monitor uses.
 struct SettingsNotificationsTab: View {
     @Bindable var store: SettingsStore
+    @Environment(AppModel.self) private var model
 
     @State private var permission: SettingsNotificationStatus = .notDetermined
     @State private var isRequesting = false
+    /// Reminder interval while reminders are on (`SettingsReminderScheduler.storedFrequency`).
+    @AppStorage(SettingsReminderScheduler.frequencyKey) private var storedFrequency: SettingsReminderFrequency = .weekly
+    /// Reminder time, minutes after midnight (`SettingsReminderScheduler.minuteOfDay`).
+    @AppStorage(SettingsReminderScheduler.minuteOfDayKey) private var reminderMinute: Int = SettingsReminderScheduler.defaultMinuteOfDay
 
     var body: some View {
         SettingsPage(tab: .notifications) {
@@ -44,7 +50,7 @@ struct SettingsNotificationsTab: View {
                 permissionButton
             }
         } footer: {
-            Text("Alerts appear while Spruce is running; the weekly reminder is scheduled with macOS itself. Nothing is sent anywhere.")
+            Text("Alerts appear while Spruce is running; Checkup reminders are scheduled with macOS itself. Nothing is sent anywhere.")
         }
     }
 
@@ -119,10 +125,26 @@ struct SettingsNotificationsTab: View {
     }
 
     private var appsSection: some View {
-        Section {
+        let applications = ApplicationsScreenModel.shared(for: model.applications)
+        let offerBinding = Binding(
+            get: { applications.offerLeftoversOnTrash },
+            set: { applications.offerLeftoversOnTrash = $0 }
+        )
+        return Section {
             SettingsToggleRow(title: "App updates available",
-                              detail: "When apps you use have newer versions. While this is on, Checkup also looks up updates online.",
+                              detail: "While this is on, Spruce looks up newer versions of your apps online once a day (and during Checkup) and tells you about new ones.",
                               symbol: "arrow.down.app", isOn: $store.settings.notifyUpdates)
+            SettingsToggleRow(title: "Offer to finish removing apps dragged to the Trash",
+                              detail: "When you drag an app to the Trash, Spruce offers to remove the files it leaves behind. You review them first.",
+                              symbol: "trash.square", isOn: offerBinding)
+            if applications.offerLeftoversOnTrash && !model.hasFullDiskAccess {
+                HStack(spacing: Spacing.m) {
+                    SettingsNote(text: "Needs Full Disk Access: macOS doesn't let Spruce see the Trash without it.",
+                                 symbol: "lock.fill")
+                    Button("Open System Settings") { Permissions.openFullDiskAccessSettings() }
+                        .controlSize(.small)
+                }
+            }
             SettingsToggleRow(title: "Threats found",
                               detail: store.settings.realtimeProtection
                                   ? "When real-time protection spots a suspicious startup item."
@@ -133,18 +155,75 @@ struct SettingsNotificationsTab: View {
         }
     }
 
+    // MARK: Checkup reminder
+
+    /// The interval in effect: off, or the stored interval while reminders are on.
+    private var reminderFrequency: SettingsReminderFrequency {
+        store.settings.weeklyCleanupReminder ? SettingsReminderScheduler.usable(storedFrequency) : .off
+    }
+
+    private var frequencyBinding: Binding<SettingsReminderFrequency> {
+        Binding(
+            get: { reminderFrequency },
+            set: { choice in
+                if choice == .off {
+                    store.settings.weeklyCleanupReminder = false
+                } else {
+                    storedFrequency = choice
+                    store.settings.weeklyCleanupReminder = true
+                }
+                // A new choice starts from the regular schedule.
+                SettingsReminderScheduler.snoozedUntil = nil
+                SettingsReminderScheduler.sync(store.settings)
+            }
+        )
+    }
+
+    private var timeBinding: Binding<Date> {
+        Binding(
+            get: { SettingsReminderScheduler.time(forMinuteOfDay: reminderMinute) },
+            set: { date in
+                let minute = SettingsReminderScheduler.minute(of: date)
+                guard minute != reminderMinute else { return }
+                reminderMinute = minute
+                SettingsReminderScheduler.sync(store.settings)
+            }
+        )
+    }
+
     private var reminderSection: some View {
-        Section {
-            SettingsToggleRow(title: "Weekly Checkup reminder",
-                              detail: "\(SettingsReminderScheduler.scheduleDescription). Clicking the reminder starts a Checkup.",
-                              symbol: "calendar.badge.clock", isOn: $store.settings.weeklyCleanupReminder)
-            if store.settings.weeklyCleanupReminder && permission == .denied {
-                SettingsNote(text: "Notifications are off for Spruce, so the reminder can't appear.")
+        let frequency = reminderFrequency
+        let next = SettingsReminderScheduler.nextReminder(frequency: frequency, minuteOfDay: reminderMinute,
+                                                          history: model.history.history)
+        return Section {
+            Picker(selection: frequencyBinding) {
+                ForEach(SettingsReminderFrequency.allCases) { option in
+                    Text(option.title).tag(option)
+                }
+            } label: {
+                SettingsRowLabel(title: "Checkup reminder",
+                                 detail: "A nudge when you haven't run a Checkup for a while. Running one yourself pushes the next reminder back.",
+                                 symbol: "calendar.badge.clock")
+            }
+            DatePicker(selection: timeBinding, displayedComponents: .hourAndMinute) {
+                Text("Remind me at")
+            }
+            .disabled(frequency == .off)
+            .padding(.leading, 30)
+            if frequency != .off {
+                if permission == .denied {
+                    SettingsNote(text: "Notifications are off for Spruce, so the reminder can't appear.")
+                } else if permission != .unavailable, let next {
+                    SettingsNote(text: "Next reminder \(Self.describe(next)). Click it, or its Scan Now button, to start a Checkup.",
+                                 symbol: "clock", color: StatusColor.info)
+                }
             }
         } header: {
             Text("Reminders")
         }
     }
+
+    // MARK: Units
 
     private var unitsSection: some View {
         Section {
@@ -153,7 +232,8 @@ struct SettingsNotificationsTab: View {
                     Text("Celsius (°C)").tag(true)
                     Text("Fahrenheit (°F)").tag(false)
                 } label: {
-                    SettingsRowLabel(title: "Temperature", detail: "Used wherever Spruce shows temperatures.",
+                    SettingsRowLabel(title: "Temperature",
+                                     detail: "Used by the menu bar monitor, for example for the startup disk's temperature when the disk reports one.",
                                      symbol: "thermometer.medium")
                 }
                 Button("Match System") {
@@ -165,6 +245,18 @@ struct SettingsNotificationsTab: View {
         } header: {
             Text("Units")
         }
+    }
+
+    /// "tomorrow at 10:00 AM", "on Tuesday, Oct 20 at 10:00 AM".
+    private static func describe(_ date: Date, now: Date = Date(), calendar: Calendar = .current) -> String {
+        let time = date.formatted(date: .omitted, time: .shortened)
+        if calendar.isDateInToday(date) { return "today at \(time)" }
+        if calendar.isDateInTomorrow(date) { return "tomorrow at \(time)" }
+        let sameYear = calendar.isDate(date, equalTo: now, toGranularity: .year)
+        let day = sameYear
+            ? date.formatted(.dateTime.weekday(.wide).month(.abbreviated).day())
+            : date.formatted(.dateTime.weekday(.wide).month(.abbreviated).day().year())
+        return "on \(day) at \(time)"
     }
 
     // MARK: Helpers

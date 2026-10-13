@@ -21,7 +21,8 @@ struct SettingsView: View {
         }
         .frame(width: SettingsLayout.width, height: SettingsLayout.height)
         .preferredColorScheme(.dark)
-        // Keep the scheduled weekly reminder in step with the settings that shape it.
+        // Keep the scheduled Checkup reminders in step with the settings that shape them
+        // (interval and time changes resync from Settings › Notifications).
         .onAppear { SettingsReminderScheduler.sync(model.settings.settings) }
         .onChange(of: model.settings.settings.weeklyCleanupReminder) { _, _ in
             SettingsReminderScheduler.sync(model.settings.settings)

@@ -3,7 +3,8 @@ import SpruceCore
 import SpruceMac
 import SwiftUI
 
-/// Protection: real-time protection and the malware scan depth (`SpruceSettings.scanDepth`).
+/// Protection: real-time protection, automatic background scans
+/// (`ProtectionEngine.backgroundSchedule`) and the malware scan depth (`SpruceSettings.scanDepth`).
 struct SettingsProtectionTab: View {
     @Bindable var store: SettingsStore
     @Environment(AppModel.self) private var model
@@ -17,6 +18,7 @@ struct SettingsProtectionTab: View {
     var body: some View {
         SettingsPage(tab: .protection) {
             realtimeSection
+            automaticSection
             depthSection
             accessSection
         }
@@ -69,6 +71,31 @@ struct SettingsProtectionTab: View {
         }
     }
 
+    /// Automatic Quick scans. Bound through the Protection screen model, which stores the
+    /// choice on the engine (`ProtectionEngine.backgroundSchedule`) and keeps the Protection
+    /// hub's own picker in step.
+    private var automaticSection: some View {
+        let screen = ProtectionScreenModel.shared(for: model.protection)
+        let schedule = Binding(
+            get: { screen.backgroundSchedule },
+            set: { screen.backgroundSchedule = $0 }
+        )
+        return Section {
+            Picker(selection: schedule) {
+                ForEach(ProtectionBackgroundSchedule.allCases) { option in
+                    Text(option.title).tag(option)
+                }
+            } label: {
+                SettingsRowLabel(title: "Background scan", detail: screen.backgroundSchedule.detail,
+                                 symbol: "clock.arrow.circlepath", tint: ModuleID.protection.palette.accentText)
+            }
+        } header: {
+            Text("Automatic Scans")
+        } footer: {
+            Text("Background scans are Quick scans. Any malware scan, including Checkup's, resets the clock. Findings wait for your review in Protection; nothing is removed on its own.")
+        }
+    }
+
     private var depthSection: some View {
         Section {
             ForEach(ProtectionScanDepth.allCases) { option in
@@ -79,7 +106,7 @@ struct SettingsProtectionTab: View {
         } header: {
             Text("Malware Scan Depth")
         } footer: {
-            Text("Applies to scans from Protection › Malware Removal. Checkup always runs a quick threat scan so it stays fast.")
+            Text("Applies to scans from Protection › Malware Removal. Checkup and background scans always run a Quick scan so they stay light.")
         }
     }
 

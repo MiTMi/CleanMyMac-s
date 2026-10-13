@@ -195,6 +195,8 @@ struct OnboardingView: View {
     private func finish(runCheckup: Bool) {
         model.settings.settings.hasCompletedOnboarding = true
         SettingsReminderScheduler.sync(model.settings.settings)
+        // The welcome guide covers this version: no What's New right after it.
+        WhatsNewTracker.markCurrentVersionSeen()
         if runCheckup {
             model.open(.checkup, tool: "checkup.scan")
             openWindow(id: "main")

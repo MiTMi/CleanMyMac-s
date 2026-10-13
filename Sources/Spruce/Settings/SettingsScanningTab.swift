@@ -161,17 +161,31 @@ private struct SettingsThresholdsSection: View {
 
 // MARK: - Clutter locations
 
+/// What the location probe depends on: the chosen folders and disk mounts/unmounts.
+private struct SettingsLocationProbe: Equatable {
+    var locations: [String]
+    var generation: Int
+}
+
 private struct SettingsClutterLocationsSection: View {
     @Bindable var store: SettingsStore
-    @State private var volumes: [ClutterLocationOption] = []
+    /// Mounted disks and which locations exist, probed off the main thread
+    /// (`ClutterLocations.loadStatus`), so a sleeping or stale disk never stalls the window.
+    @State private var status = ClutterLocationStatus()
+    /// Bumped when a disk is mounted or unmounted, to probe again.
+    @State private var mountGeneration = 0
 
     private var locations: [String] { store.settings.clutterLocations }
 
     /// Standard folders and mounted disks not covered yet.
     private var quickAddOptions: [ClutterLocationOption] {
-        (ClutterLocations.standard + volumes).filter { option in
+        (ClutterLocations.standard + status.volumes).filter { option in
             SettingsClutterLocations.merged(locations, adding: [option.path]) != locations
         }
+    }
+
+    private var summary: String {
+        ClutterLocations.summary(titles: locations.map { status.option(for: $0).title })
     }
 
     var body: some View {
@@ -186,7 +200,8 @@ private struct SettingsClutterLocationsSection: View {
                 }
             }
             ForEach(locations, id: \.self) { path in
-                SettingsLocationRow(path: path) {
+                SettingsLocationRow(path: path, option: status.option(for: path),
+                                    isAvailable: status.isAvailable(path)) {
                     store.settings.clutterLocations = SettingsClutterLocations.removing(path, from: locations)
                 }
             }
@@ -212,10 +227,19 @@ private struct SettingsClutterLocationsSection: View {
                 Spacer()
             }
             .controlSize(.small)
-            .onAppear { volumes = ClutterLocations.volumes() }
+            .task(id: SettingsLocationProbe(locations: locations, generation: mountGeneration)) {
+                let probed = await ClutterLocations.loadStatus(for: locations)
+                guard !Task.isCancelled else { return }
+                status = probed
+            }
+            .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didMountNotification)) { _ in
+                mountGeneration += 1
+            }
+            .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didUnmountNotification)) { _ in
+                mountGeneration += 1
+            }
         } header: {
-            SettingsSectionHeader(title: "Clutter Locations",
-                                  trailing: locations.isEmpty ? nil : ClutterLocations.summary(locations))
+            SettingsSectionHeader(title: "Clutter Locations", trailing: locations.isEmpty ? nil : summary)
         } footer: {
             Text("Clutter looks for large, old, duplicate and similar files here. Folders inside a chosen location are included automatically.")
         }
@@ -232,18 +256,19 @@ private struct SettingsClutterLocationsSection: View {
         panel.directoryURL = URL(fileURLWithPath: NSHomeDirectory())
         guard panel.runModal() == .OK else { return }
         let paths = panel.urls.map(\.path)
+        // The new locations are probed by the section's task (it follows `locations`).
         store.settings.clutterLocations = SettingsClutterLocations.merged(locations, adding: paths)
-        volumes = ClutterLocations.volumes()
     }
 }
 
+/// One chosen location. Reads the probed option and availability; never touches the disk.
 private struct SettingsLocationRow: View {
     var path: String
+    var option: ClutterLocationOption
+    var isAvailable: Bool
     var onRemove: () -> Void
 
     var body: some View {
-        let option = ClutterLocations.option(for: path)
-        let exists = ClutterLocations.exists(path)
         HStack(spacing: Spacing.m) {
             Image(systemName: option.symbol)
                 .font(.system(size: 14, weight: .medium))
@@ -252,7 +277,7 @@ private struct SettingsLocationRow: View {
             VStack(alignment: .leading, spacing: 1) {
                 HStack(spacing: Spacing.s) {
                     Text(option.title).font(SpruceFont.body).foregroundStyle(Ink.primary)
-                    if !exists {
+                    if !isAvailable {
                         PrismChip(text: "Not available", color: StatusColor.warning, symbol: "exclamationmark")
                     } else if let detail = option.detail {
                         Text(detail).font(SpruceFont.caption).foregroundStyle(Ink.tertiary)
@@ -268,7 +293,7 @@ private struct SettingsLocationRow: View {
             PrismIconButton(symbol: "magnifyingglass", help: "Show in Finder") {
                 SettingsFinder.reveal(path)
             }
-            .disabled(!exists)
+            .disabled(!isAvailable)
             PrismIconButton(symbol: "minus", help: "Remove location", action: onRemove)
         }
         .accessibilityElement(children: .contain)

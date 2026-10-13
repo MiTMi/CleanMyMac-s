@@ -3,8 +3,11 @@ import SpruceCore
 import SpruceMac
 import SwiftUI
 
-/// About: version, system, safety principles and the independence notice.
+/// About: version, What's New, system, safety principles and the independence notice.
 struct SettingsAboutTab: View {
+    @Environment(AppModel.self) private var model
+    @State private var whatsNew: WhatsNewRelease?
+
     var body: some View {
         ZStack {
             SettingsBackdrop(module: SettingsTab.about.module)
@@ -17,6 +20,10 @@ struct SettingsAboutTab: View {
                 .padding(.horizontal, Spacing.xxl)
                 .padding(.vertical, Spacing.xl)
             }
+        }
+        .sheet(item: $whatsNew) { release in
+            WhatsNewView(release: release) { whatsNew = nil }
+                .environment(model)
         }
     }
 
@@ -33,6 +40,12 @@ struct SettingsAboutTab: View {
                 .font(SpruceFont.callout.monospacedDigit())
                 .foregroundStyle(Ink.secondary)
                 .textSelection(.enabled)
+            if let release = WhatsNewCatalog.release(for: WhatsNewTracker.currentVersion) {
+                PrismTextButton(title: "What's New in \(WhatsNewView.shortVersion(release.version))",
+                                symbol: "sparkles", module: SettingsTab.about.module) {
+                    whatsNew = release
+                }
+            }
             Text("Clean, protect and speed up your Mac, with every change in your hands.")
                 .font(SpruceFont.body)
                 .foregroundStyle(Ink.secondary)

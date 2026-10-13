@@ -33,7 +33,7 @@ struct SettingsAdvancedTab: View {
             Button("Reset Settings", role: .destructive) { resetSettings() }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Every preference returns to its default, including Checkup choices, Cleanup exclusions, Clutter locations, alert thresholds and all ignore lists. History and logs are kept.")
+            Text("Every preference returns to its default, including Checkup choices, Cleanup exclusions, Clutter locations, alert thresholds, reminders, automatic scans and all ignore lists. History and logs are kept.")
         }
     }
 
@@ -156,6 +156,10 @@ struct SettingsAdvancedTab: View {
         if SettingsLoginItem.state.isRequested != fresh.launchAtLogin {
             SettingsLoginItem.set(fresh.launchAtLogin, store: store)
         }
+        // Preferences shown in this window but kept outside `SpruceSettings`.
+        SettingsReminderScheduler.resetPreferences()
+        ProtectionScreenModel.shared(for: model.protection).backgroundSchedule = .defaultValue
+        ApplicationsScreenModel.shared(for: model.applications).offerLeftoversOnTrash = ApplicationsPreferences().offerLeftoversOnTrash
         SettingsReminderScheduler.sync(fresh)
         resetDone = true
     }

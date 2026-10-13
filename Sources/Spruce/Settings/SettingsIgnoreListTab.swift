@@ -186,9 +186,12 @@ private struct SettingsIgnoredPathRow: View {
     var path: String
     var onRemove: () -> Void
 
+    /// Whether the item is still there (checked off the main thread; nil until known).
+    @State private var found: Bool?
+
     var body: some View {
         let absolute = path.expandingTilde
-        let exists = SettingsFinder.exists(path)
+        let exists = found ?? false
         HStack(spacing: Spacing.m) {
             ItemIcon(url: exists ? URL(fileURLWithPath: absolute) : nil, symbol: "questionmark.folder", size: 24)
             VStack(alignment: .leading, spacing: 1) {
@@ -197,7 +200,7 @@ private struct SettingsIgnoredPathRow: View {
                         .font(SpruceFont.body)
                         .foregroundStyle(Ink.primary)
                         .lineLimit(1)
-                    if !exists {
+                    if found == false {
                         PrismChip(text: "Missing", color: StatusColor.warning)
                     }
                 }
@@ -222,6 +225,7 @@ private struct SettingsIgnoredPathRow: View {
             Divider()
             Button("Stop Ignoring", action: onRemove)
         }
+        .task(id: path) { found = await SettingsFinder.existsInBackground(path) }
     }
 }
 

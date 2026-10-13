@@ -230,7 +230,7 @@ struct OnboardingStayInformedPage: View {
             }
             VStack(spacing: 0) {
                 OnboardingOptionRow(symbol: "bell.fill", module: .performance, title: "Alerts & reminders",
-                                    detail: "Low disk space, heavy memory use, threats and a weekly Checkup nudge.") {
+                                    detail: "Low disk space, heavy memory use, threats and a nudge when a Checkup is due.") {
                     notificationTrailing
                 }
                 Divider().opacity(0.5).padding(.leading, 56)
