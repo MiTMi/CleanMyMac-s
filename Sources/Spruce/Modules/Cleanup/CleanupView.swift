@@ -137,10 +137,7 @@ final class CleanupScreenModel {
     var appsToQuitCount: Int {
         let rows = flow.selectedItems.filter { $0.metadata[CleanupMetadataKey.quitToClean] == "1" }
         guard !rows.isEmpty else { return 0 }
-        let ownPID = ProcessInfo.processInfo.processIdentifier
-        let running = Set(NSWorkspace.shared.runningApplications.filter {
-            !$0.isTerminated && $0.activationPolicy != .prohibited && $0.processIdentifier != ownPID
-        }.compactMap(\.bundleIdentifier))
+        let running = Set(CleanupRunningApps.quittable().compactMap(\.bundleIdentifier))
         return CleanupOwnership.runningOwners(of: rows, running: running).count
     }
 
@@ -345,12 +342,14 @@ final class CleanupScreenModel {
             cleanScope = nil
             return
         }
-        let runningApps = NSWorkspace.shared.runningApplications
+        // Only apps the sheet can quit; rows held by anything else are skipped by the
+        // engine while it runs (the same apps Checkup's sheet and the card count).
+        let runningApps = CleanupRunningApps.quittable()
         let running = Set(runningApps.compactMap(\.bundleIdentifier))
         let owners = CleanupOwnership.runningOwners(of: selected, running: running)
         let apps = runningApps.filter { app in
             guard let id = app.bundleIdentifier else { return false }
-            return owners.contains(id) && app.processIdentifier != ProcessInfo.processInfo.processIdentifier
+            return owners.contains(id)
         }
         if !apps.isEmpty {
             quitPrompt = CleanupQuitPrompt(apps: apps.map { CleanupRunningApp(app: $0) })

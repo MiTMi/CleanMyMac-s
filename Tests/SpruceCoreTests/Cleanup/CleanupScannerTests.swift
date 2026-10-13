@@ -527,6 +527,20 @@ final class CleanupScannerTests: XCTestCase {
         XCTAssertEqual(idleNames, ["old.bin"])
     }
 
+    func testQuitFirstFileRowChangedJustBeforeCleaningIsSkipped() throws {
+        // A loose cache file named after the app is a whole row; the floor applies to it too.
+        let path = fx.file("Library/Caches/com.busy.app", age: 2 * day)
+        let (_, open) = fx.scan(fx.context(running: ["com.busy.app"]), sections: [.systemJunk])
+        let item = try XCTUnwrap(open.item(endingWith: "Library/Caches/com.busy.app"))
+        XCTAssertEqual(item.metadata[CleanupMetadataKey.quitToClean], "1")
+        let (quitScanner, _) = fx.scan(fx.context(), sections: [.systemJunk])
+        XCTAssertEqual(quitScanner.expand(item).targets.count, 1)
+        fx.setAge(path, 30)
+        let expansion = quitScanner.expand(item)
+        XCTAssertNotNil(expansion.failure)
+        XCTAssertTrue(expansion.targets.isEmpty)
+    }
+
     func testCacheHeldOnlyByABackgroundHelperStaysUnchecked() throws {
         // A background-only process can't be quit from the sheet, so its app's cache is
         // left alone (the old behaviour) instead of being selected and never cleaned.

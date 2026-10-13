@@ -497,7 +497,21 @@ public struct CleanupScanner: Sendable {
     /// filters after checking the folder is still the object that was scanned.
     public func expand(_ item: ScanItem) -> CleanupExpansion {
         let mode = item.metadata[CleanupMetadataKey.mode] ?? "whole"
-        guard mode != "whole" else { return CleanupExpansion(targets: [item]) }
+        guard mode != "whole" else {
+            // A quit-first file row keeps the floor too: skip it if it changed in the last
+            // minutes (something may still be writing it).
+            if item.metadata[CleanupMetadataKey.quitToClean] == "1", let path = item.url?.path,
+               let ruleID = item.metadata[CleanupMetadataKey.ruleID], let rule = rule(id: ruleID),
+               rule.whileRunning == .quitFirst,
+               let entry = FileWalker.entry(at: path), !entry.isSymlink {
+                let usage = measure(path, entry: entry, budget: rule.measureBudget)
+                if isRecent(newest: usage.newest, newestAccess: usage.newestAccess, rule: rule,
+                            limit: quitFirstAgeLimit(rule)) {
+                    return CleanupExpansion(failure: "Changed since the scan; skipped")
+                }
+            }
+            return CleanupExpansion(targets: [item])
+        }
         guard let url = item.url else { return CleanupExpansion(failure: "Not a file") }
         guard let ruleID = item.metadata[CleanupMetadataKey.ruleID], let rule = rule(id: ruleID),
               let index = ruleIndex[ruleID] else {
@@ -663,9 +677,9 @@ public struct CleanupScanner: Sendable {
         }
         // Group containers carry a team ID or "group." in front of the app's bundle ID
         // ("ABCDE12345.com.crowdstrike.falcon"), so match their owner too.
-        let original = CleanupPaths.components(path)
-        if original.count == lower.count {
-            for index in lower.indices.dropFirst() where lower[index - 1] == "group containers" {
+        if lower.contains("group containers") {
+            let original = CleanupPaths.components(path)
+            for index in lower.indices.dropFirst() where lower[index - 1] == "group containers" && index < original.count {
                 guard let owner = CleanupOwnership.owner(forGroupContainer: original[index])?.lowercased() else { continue }
                 if protectedNames.contains(where: { CleanupPaths.matchComponent(owner, $0) }) { return true }
             }

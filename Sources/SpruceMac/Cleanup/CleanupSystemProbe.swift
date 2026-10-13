@@ -48,15 +48,9 @@ enum CleanupSystemProbe {
         }
     }
 
-    /// Running apps a quit sheet can show and quit: not background-only, and not Spruce.
-    /// (The same filter as Checkup's quit sheet.)
+    /// Bundle identifiers of `CleanupRunningApps.quittable()`.
     static func quittableBundleIDs() async -> Set<String> {
-        await MainActor.run {
-            let ownPID = ProcessInfo.processInfo.processIdentifier
-            return Set(NSWorkspace.shared.runningApplications.filter {
-                !$0.isTerminated && $0.activationPolicy != .prohibited && $0.processIdentifier != ownPID
-            }.compactMap(\.bundleIdentifier))
-        }
+        await MainActor.run { Set(CleanupRunningApps.quittable().compactMap(\.bundleIdentifier)) }
     }
 
     /// Executable names of all processes (Xcode build tools and simulators have no
@@ -189,5 +183,24 @@ enum CleanupMailAccounts {
         if server.contains(where: { t.contains($0) }) { return .server }
         if t.contains("onmymac") || t.contains("local") { return .local }
         return .unknown
+    }
+}
+
+/// The open apps Cleanup can ask to quit before cleaning their caches.
+public enum CleanupRunningApps {
+    /// Running apps a quit sheet can show and quit: regular apps, and menu bar apps that
+    /// aren't part of macOS (launchd restarts Apple's own agents right after they quit).
+    /// Never background-only processes, and never Spruce itself.
+    @MainActor
+    public static func quittable() -> [NSRunningApplication] {
+        let ownPID = ProcessInfo.processInfo.processIdentifier
+        return NSWorkspace.shared.runningApplications.filter { app in
+            guard !app.isTerminated, app.processIdentifier != ownPID, let id = app.bundleIdentifier else { return false }
+            switch app.activationPolicy {
+            case .regular: return true
+            case .accessory: return !id.lowercased().hasPrefix("com.apple.")
+            default: return false
+            }
+        }
     }
 }
