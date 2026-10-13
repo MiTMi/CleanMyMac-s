@@ -55,7 +55,7 @@ affiliated with MacPaw.
 1. Open the repository's **Actions** tab, pick the latest green **Build** run on the
    `claude/brave-ptolemy-jnm0it` branch, and download the **Spruce-app** artifact.
 2. Unzip it and drag **Spruce.app** to `/Applications`.
-3. The build is ad-hoc signed (not notarized), so the first launch needs:
+3. CI builds are ad-hoc signed (not notarized), so the first launch needs:
    right-click **Spruce.app → Open → Open**, or run
    `xattr -dr com.apple.quarantine /Applications/Spruce.app`.
 
@@ -70,14 +70,50 @@ cd CleanMyMac-s
 open build/Spruce.app
 ```
 
-**Tip — keep permissions across rebuilds.** macOS ties Full Disk Access to the app's
-signature, and an ad-hoc signature changes on every build. Create a self-signed
-code-signing certificate once (Keychain Access › Certificate Assistant › Create a
-Certificate…, type *Code Signing*, e.g. named "Spruce Local") and build with:
+### Signed builds on your Mac (Apple Developer account)
+
+With an Apple Developer membership, `build-app.sh` signs Spruce with your **Developer ID**
+certificate, has Apple **notarize** it and **staples** the ticket. The result opens without
+any Gatekeeper warning, and Full Disk Access and other permissions **survive every rebuild
+and update** (macOS recognises the app by your Team ID). Nothing is uploaded except the app
+itself, to Apple's notary service; your certificate never leaves your Mac.
+
+**One-time setup** (about 10 minutes):
+
+1. **Certificate** — Xcode › Settings › Accounts › select your team › **Manage
+   Certificates…** › **+** › **Developer ID Application**. Check it is there:
+   ```bash
+   security find-identity -v -p codesigning     # shows "Developer ID Application: …"
+   ```
+2. **Notarization credentials**, saved in your keychain under the name `spruce-notary`.
+   Pick one:
+   * **App-specific password** (simplest): create one at account.apple.com › Sign-In and
+     Security › App-Specific Passwords, then run (it asks for that password):
+     ```bash
+     xcrun notarytool store-credentials spruce-notary --apple-id "you@example.com" --team-id "TEAMID"
+     ```
+   * **App Store Connect API key**: App Store Connect › Users and Access › Integrations ›
+     App Store Connect API › **+** (role *Developer*), download the `.p8`, then:
+     ```bash
+     xcrun notarytool store-credentials spruce-notary --key ~/Downloads/AuthKey_KEYID.p8 --key-id KEYID --issuer ISSUER-ID
+     ```
+   Your Team ID is on developer.apple.com › Account › Membership details.
+
+**Every build** after that:
 
 ```bash
-SIGN_IDENTITY="Spruce Local" ./scripts/build-app.sh
+./scripts/build-app.sh      # signs, notarizes (1–3 min), staples → build/Spruce.app
 ```
+
+Then drag `build/Spruce.app` to `/Applications`, replacing the previous copy. The first
+time, macOS asks whether `codesign` may use your signing key: choose **Always Allow**.
+
+Options: `NOTARIZE=0` signs without notarizing (faster for quick local tests);
+`SIGN_IDENTITY="Developer ID Application: …"` picks a certificate if you have several;
+`NOTARY_PROFILE=name` uses differently named credentials. Without a developer account
+you can still keep permissions across rebuilds with a self-signed certificate (Keychain
+Access › Certificate Assistant › Create a Certificate…, type *Code Signing*) and
+`SIGN_IDENTITY="<its name>" ./scripts/build-app.sh` — it just won't be notarized.
 
 ### First launch
 
