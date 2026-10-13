@@ -93,9 +93,7 @@ public final class CloudStorageEngine: @unchecked Sendable {
     public func toolAvailability() async -> CloudStorageToolAvailability {
         if let cached = cachedTools { return cached }
         let detected = await CloudStorageTools.detect()
-        lock.lock()
-        storedTools = detected
-        lock.unlock()
+        storeTools(detected)
         return detected
     }
 
@@ -103,6 +101,12 @@ public final class CloudStorageEngine: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return storedTools
+    }
+
+    private func storeTools(_ tools: CloudStorageToolAvailability) {
+        lock.lock()
+        storedTools = tools
+        lock.unlock()
     }
 
     // MARK: Scan
@@ -124,8 +128,8 @@ public final class CloudStorageEngine: @unchecked Sendable {
                 for (index, provider) in providers.enumerated() {
                     group.addTask {
                         let report = await CloudStorageThreadRunner.run {
-                            Self.scanOne(provider, options: options, ignoredIDs: ignoredIDs, threshold: threshold,
-                                         flag: flag, progress: progress)
+                            CloudStorageEngine.scanOne(provider, options: options, ignoredIDs: ignoredIDs,
+                                                       threshold: threshold, flag: flag, progress: progress)
                         }
                         return (index, report)
                     }
@@ -139,8 +143,13 @@ public final class CloudStorageEngine: @unchecked Sendable {
         }
 
         if flag.isCancelled || Task.isCancelled { throw SpruceError.cancelled }
+        store(reports, replacingAll: replacingAll)
+        return reports
+    }
 
+    private func store(_ reports: [CloudStorageProviderReport], replacingAll: Bool) {
         lock.lock()
+        defer { lock.unlock() }
         if replacingAll {
             storedReports = reports
         } else {
@@ -153,8 +162,6 @@ public final class CloudStorageEngine: @unchecked Sendable {
             }
         }
         storedScanDate = Date()
-        lock.unlock()
-        return reports
     }
 
     private func scanOptions(_ settings: SpruceSettings) -> CloudStorageScanOptions {

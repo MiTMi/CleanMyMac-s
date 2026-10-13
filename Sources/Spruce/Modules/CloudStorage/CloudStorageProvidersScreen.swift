@@ -75,7 +75,7 @@ struct CloudStorageProviderList: View {
             }
             if screen.providers.count > 4 {
                 ScrollView { cards }
-                    .frame(maxHeight: 300)
+                    .frame(maxHeight: 260)
             } else {
                 cards
             }
@@ -107,7 +107,7 @@ struct CloudStorageProviderCard: View {
     var body: some View {
         let palette = ModuleID.cloudStorage.palette
         Button(action: onToggle) {
-            HStack(alignment: .top, spacing: Spacing.m) {
+            HStack(alignment: .center, spacing: Spacing.m) {
                 PrismCategoryBadge(symbol: provider.kind.symbol, module: .cloudStorage, size: 32, isDimmed: !isIncluded)
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: Spacing.xs) {
@@ -130,10 +130,6 @@ struct CloudStorageProviderCard: View {
                         .foregroundStyle(Ink.tertiary)
                         .lineLimit(1)
                         .truncationMode(.middle)
-                    Text(provider.mechanism.explanation)
-                        .font(SpruceFont.caption)
-                        .foregroundStyle(Ink.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: Spacing.xs)
                 Image(systemName: isIncluded ? "checkmark.circle.fill" : "circle")
@@ -147,7 +143,7 @@ struct CloudStorageProviderCard: View {
         .buttonStyle(PrismPressStyle())
         .onHover { hovering = $0 }
         .animation(Motion.quick, value: hovering)
-        .help(isIncluded ? "Included in the scan — click to leave it out" : "Left out of the scan — click to include it")
+        .help(provider.mechanism.explanation + (isIncluded ? " Included in the scan; click to leave it out." : " Left out of the scan; click to include it."))
         .accessibilityLabel("\(provider.displayName), \(isIncluded ? "included" : "not included")")
         .accessibilityAddTraits(isIncluded ? .isSelected : [])
     }
