@@ -75,6 +75,7 @@ struct CleanupResultsScreen: View {
             state: state(for: section, group: group),
             isLead: isLead,
             inUseCount: section == .systemJunk ? screen.inUseCount : 0,
+            appsToQuitCount: section == .systemJunk ? screen.appsToQuitCount : 0,
             unavailable: section == .systemJunk ? screen.unavailableItems(in: .systemJunk) : [],
             onReview: { screen.route = .review(section) },
             onClean: { screen.requestClean(in: section) },

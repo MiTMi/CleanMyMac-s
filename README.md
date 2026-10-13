@@ -27,6 +27,9 @@ affiliated with MacPaw.
 
 * **Review before anything is removed.** Only items rated *safe* (regenerable caches,
   logs, temp files) are pre-selected; anything else needs your explicit choice.
+* **Open apps are quit first.** Caches of apps that are open are selected (as in
+  CleanMyMac), but Clean asks to quit those apps first, and nothing of an app is removed
+  while it's still open.
 * **Trash first.** Personal files, apps and leftovers go to the Trash. Permanent
   deletion only happens inside regenerable cache/log/temp/Trash locations.
 * **A hard guard on every deletion** (`PathGuard`) refuses system folders, the Signed

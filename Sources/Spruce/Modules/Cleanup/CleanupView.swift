@@ -125,8 +125,19 @@ final class CleanupScreenModel {
         unavailable.filter { $0.category.section == section }
     }
 
+    /// Rows of open apps that stay unchecked (their rule doesn't quit the app).
     var inUseCount: Int {
-        flow.groups.allItems.filter { $0.metadata[CleanupMetadataKey.inUse] == "1" }.count
+        flow.groups.allItems.filter {
+            $0.metadata[CleanupMetadataKey.inUse] == "1" && $0.metadata[CleanupMetadataKey.quitToClean] != "1"
+        }.count
+    }
+
+    /// Open apps whose selected caches Clean asks to quit first.
+    var appsToQuitCount: Int {
+        Set(flow.selectedItems.compactMap { item -> String? in
+            guard item.metadata[CleanupMetadataKey.quitToClean] == "1" else { return nil }
+            return item.metadata[CleanupMetadataKey.bundleID] ?? item.metadata[CleanupMetadataKey.owner]
+        }).count
     }
 
     var selectionNeedsAdmin: Bool {

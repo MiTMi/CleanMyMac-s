@@ -250,6 +250,20 @@ public struct CleanupRule: Sendable, Hashable, Identifiable {
         }
     }
 
+    /// What happens to a row whose owning app (per `gate`) is open.
+    public enum RunningPolicy: String, Sendable, Hashable {
+        /// Listed unchecked, and skipped at clean time while the app is open.
+        case skip
+        /// Selected as usual (CleanMyMac 5 behaviour for app caches): the Clean / Run
+        /// step asks to quit the app first, and the row is skipped if it stays open.
+        /// While the app is open its content is counted regardless of `minAge`, since
+        /// nothing is removed before it quits.
+        case quitFirst
+        /// The app being open doesn't matter (e.g. log files older than a week, which no
+        /// app is still writing).
+        case allow
+    }
+
     public enum AgeBasis: String, Sendable, Hashable {
         /// Newest modification date.
         case modification
@@ -275,6 +289,8 @@ public struct CleanupRule: Sendable, Hashable, Identifiable {
     public var minAge: TimeInterval
     public var ageBasis: AgeBasis
     public var gate: Gate
+    /// How rows of an open app are treated (see `RunningPolicy`).
+    public var whileRunning: RunningPolicy
     /// Name globs a file must match (files/findFiles/each). Empty = any name.
     public var namePatterns: [String]
     /// Child-name globs that are never counted.
@@ -310,6 +326,7 @@ public struct CleanupRule: Sendable, Hashable, Identifiable {
         minAge: TimeInterval = 0,
         ageBasis: AgeBasis = .modification,
         gate: Gate = .none,
+        whileRunning: RunningPolicy = .skip,
         namePatterns: [String] = [],
         excludedNames: [String] = [],
         reviewNames: [String] = [],
@@ -334,6 +351,7 @@ public struct CleanupRule: Sendable, Hashable, Identifiable {
         self.minAge = minAge
         self.ageBasis = ageBasis
         self.gate = gate
+        self.whileRunning = whileRunning
         self.namePatterns = namePatterns
         self.excludedNames = excludedNames
         self.reviewNames = reviewNames
@@ -591,6 +609,9 @@ public enum CleanupMetadataKey {
     public static let zone = "zone"
     public static let needsAdmin = "needsAdmin"
     public static let inUse = "inUse"
+    /// "1" on a selected row of an open app whose rule quits the app before cleaning
+    /// (`RunningPolicy.quitFirst`).
+    public static let quitToClean = "quitToClean"
     public static let launchItem = "launchItem"
     /// Recommended selection ("1"/"0"), used by "Select Recommended".
     public static let recommended = "recommended"

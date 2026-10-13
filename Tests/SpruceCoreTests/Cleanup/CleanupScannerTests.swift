@@ -69,19 +69,23 @@ final class CleanupScannerTests: XCTestCase {
         XCTAssertFalse(ids.contains { $0.hasPrefix(fx.root + "/outside") })
     }
 
-    func testRunningAppCacheIsListedUnselectedAndBlockedAtRemoval() throws {
+    func testRunningAppCacheIsSelectedButBlockedUntilTheAppQuits() throws {
+        // CleanMyMac 5 behaviour: an open app's cache is selected, and cleaning asks to
+        // quit the app first; it is never removed while the app is open.
         fx.file("Library/Caches/com.example.app/cache.bin", age: 2 * day)
         let (scanner, report) = fx.scan(fx.context(running: ["com.example.app"]), sections: [.systemJunk])
         let item = try XCTUnwrap(report.item(endingWith: "com.example.app"))
-        XCTAssertFalse(item.isSelected)
+        XCTAssertTrue(item.isSelected)
         XCTAssertEqual(item.metadata[CleanupMetadataKey.inUse], "1")
-        XCTAssertEqual(item.metadata[CleanupMetadataKey.recommended], "0")
+        XCTAssertEqual(item.metadata[CleanupMetadataKey.quitToClean], "1")
+        XCTAssertEqual(item.metadata[CleanupMetadataKey.recommended], "1")
         XCTAssertNotNil(scanner.blockingReason(for: item))
 
         // A helper of the app (reverse-DNS child) counts as the same owner.
         fx.file("Library/Caches/com.example.app.helper/cache.bin", age: 2 * day)
         let (_, second) = fx.scan(fx.context(running: ["com.example.app"]), sections: [.systemJunk])
-        XCTAssertEqual(second.item(endingWith: "com.example.app.helper")?.isSelected, false)
+        let helper = try XCTUnwrap(second.item(endingWith: "com.example.app.helper"))
+        XCTAssertEqual(helper.metadata[CleanupMetadataKey.quitToClean], "1")
         XCTAssertEqual(CleanupOwnership.runningOwners(of: [item], running: ["com.example.app", "com.other"]),
                        ["com.example.app"])
     }
@@ -99,8 +103,9 @@ final class CleanupScannerTests: XCTestCase {
                         "org.mozilla.firefoxbeta"] {
             let (scanner, report) = fx.scan(fx.context(running: [channel]), sections: [.systemJunk])
             let item = try XCTUnwrap(report.item(endingWith: "Library/Caches/Firefox"), channel)
-            XCTAssertFalse(item.isSelected, channel)
+            XCTAssertTrue(item.isSelected, channel)
             XCTAssertEqual(item.metadata[CleanupMetadataKey.inUse], "1", channel)
+            XCTAssertEqual(item.metadata[CleanupMetadataKey.quitToClean], "1", channel)
             XCTAssertNotNil(scanner.blockingReason(for: item), channel)
             XCTAssertEqual(CleanupOwnership.runningOwners(of: [item], running: [channel, "com.other"]), [channel])
         }
@@ -478,12 +483,57 @@ final class CleanupScannerTests: XCTestCase {
         XCTAssertEqual(CleanupPaths.escapeGlob("/a/b[1]*?"), "/a/b[[]1][*][?]")
     }
 
-    func testCheckupLeavesRunningAppsAndReviewItemsOut() {
+    func testCheckupKeepsCachesOfOpenAppsButLeavesOtherBlockedAndReviewItemsOut() throws {
         fx.file("Library/Caches/com.busy.app/cache.bin", age: 2 * day)
         fx.file("Library/Caches/com.idle.app/cache.bin", age: 2 * day)
-        let (_, report) = fx.scan(fx.context(running: ["com.busy.app"], purpose: .checkup), sections: [.systemJunk])
+        fx.file("Library/Developer/Xcode/DerivedData/MyApp-abcdefghijklmnopqrstuvwxyzab/Build/x.o", age: 3 * day)
+        fx.ageFolders(fx.home + "/Library/Developer/Xcode/DerivedData/MyApp-abcdefghijklmnopqrstuvwxyzab/Build",
+                      age: 3 * day)
+        let context = fx.context(running: ["com.busy.app", "com.apple.dt.Xcode"], purpose: .checkup)
+        let (_, report) = fx.scan(context, sections: [.systemJunk])
         XCTAssertNotNil(report.item(endingWith: "com.idle.app"))
-        XCTAssertNil(report.item(endingWith: "com.busy.app"), "items of open apps are not part of Checkup")
+        // Checkup's Run asks to quit the app, like the Cleanup module.
+        let busy = try XCTUnwrap(report.item(endingWith: "com.busy.app"))
+        XCTAssertEqual(busy.metadata[CleanupMetadataKey.quitToClean], "1")
+        // Rules that skip open apps (Xcode junk while Xcode runs) stay out of Checkup.
+        XCTAssertNil(report.item(endingWith: "MyApp-abcdefghijklmnopqrstuvwxyzab"))
         XCTAssertTrue(report.groups.allItems.allSatisfy(\.isSelected))
+    }
+
+    func testOpenAppCacheCountsRecentContentAndCleansItOnlyOnceTheAppQuit() throws {
+        fx.file("Library/Caches/com.busy.app/old.bin", bytes: 10_000, age: 2 * day)
+        fx.file("Library/Caches/com.busy.app/live.bin", bytes: 20_000, age: 60)
+
+        // Closed: content written in the last hour is neither counted nor removed.
+        let (_, closed) = fx.scan(fx.context(), sections: [.systemJunk])
+        let idle = try XCTUnwrap(closed.item(endingWith: "com.busy.app"))
+        XCTAssertNil(idle.metadata[CleanupMetadataKey.quitToClean])
+
+        // Open: everything counts, since nothing goes before the app quits.
+        let (busyScanner, open) = fx.scan(fx.context(running: ["com.busy.app"]), sections: [.systemJunk])
+        let item = try XCTUnwrap(open.item(endingWith: "com.busy.app"))
+        XCTAssertGreaterThan(item.size, idle.size)
+        XCTAssertNotNil(busyScanner.blockingReason(for: item), "never removed while the app is open")
+
+        // After the app quit, cleaning takes the recent file too.
+        let (quitScanner, _) = fx.scan(fx.context(), sections: [.systemJunk])
+        XCTAssertNil(quitScanner.blockingReason(for: item))
+        let names = Set(quitScanner.expand(item).targets.compactMap { $0.url?.lastPathComponent })
+        XCTAssertEqual(names, ["old.bin", "live.bin"])
+        // A row scanned while the app was closed keeps the age limit.
+        let idleNames = quitScanner.expand(idle).targets.compactMap { $0.url?.lastPathComponent }
+        XCTAssertEqual(idleNames, ["old.bin"])
+    }
+
+    func testOldLogsOfOpenAppsAreSelectedWithoutQuittingThem() throws {
+        fx.file("Library/Logs/com.example.app/old.log", age: 10 * day)
+        fx.ageFolders(fx.home + "/Library/Logs/com.example.app", age: 10 * day)
+        let (scanner, report) = fx.scan(fx.context(running: ["com.example.app"]), sections: [.systemJunk])
+        let item = try XCTUnwrap(report.item(endingWith: "Library/Logs/com.example.app"))
+        XCTAssertTrue(item.isSelected)
+        XCTAssertNil(item.metadata[CleanupMetadataKey.inUse])
+        XCTAssertNil(item.metadata[CleanupMetadataKey.owner], "no quit prompt for week-old logs")
+        XCTAssertNil(scanner.blockingReason(for: item))
+        XCTAssertTrue(CleanupOwnership.runningOwners(of: [item], running: ["com.example.app"]).isEmpty)
     }
 }

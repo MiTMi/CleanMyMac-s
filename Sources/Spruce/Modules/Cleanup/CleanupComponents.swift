@@ -22,6 +22,8 @@ struct CleanupSectionCard: View {
     let state: CleanupCardState
     var isLead: Bool = false
     var inUseCount: Int = 0
+    /// Open apps whose selected caches Clean asks to quit first.
+    var appsToQuitCount: Int = 0
     /// Categories of this section macOS didn't let Spruce scan, with the reason.
     var unavailable: [CleanupUnavailable] = []
     var onReview: () -> Void
@@ -57,7 +59,14 @@ struct CleanupSectionCard: View {
                 .font(SpruceFont.caption.monospacedDigit())
                 .foregroundStyle(Ink.tertiary)
             if isLead {
-                CleanupIncludesList(group: group)
+                CleanupIncludesList(group: group, onReview: onReview)
+            }
+            if appsToQuitCount > 0 {
+                Label("Includes caches of \(CountFormat.items(appsToQuitCount, singular: "open app", plural: "open apps")). Spruce asks to quit them when you clean.",
+                      systemImage: "xmark.app")
+                    .font(SpruceFont.caption)
+                    .foregroundStyle(Ink.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             if inUseCount > 0 {
                 Label("\(CountFormat.items(inUseCount)) left alone because their apps are open",
@@ -175,22 +184,19 @@ struct CleanupSectionCard: View {
 /// "Includes" list of the largest categories inside a section.
 struct CleanupIncludesList: View {
     let group: ScanGroup
+    /// Opens the section's review (each row is a shortcut to it).
+    var onReview: (() -> Void)? = nil
 
     var body: some View {
         let top = group.children.sorted { $0.totalSize > $1.totalSize }.prefix(5)
         VStack(alignment: .leading, spacing: 6) {
             ForEach(Array(top)) { child in
-                HStack(spacing: Spacing.s) {
-                    Image(systemName: child.symbol)
-                        .font(.system(size: 11))
-                        .foregroundStyle(Ink.tertiary)
-                        .frame(width: 16)
-                    Text(child.title)
-                        .font(SpruceFont.callout)
-                        .foregroundStyle(Ink.primary)
-                        .lineLimit(1)
-                    Spacer(minLength: Spacing.s)
-                    SizeBadge(bytes: child.totalSize)
+                if let onReview {
+                    Button(action: onReview) { row(child, chevron: true) }
+                        .buttonStyle(.plain)
+                        .help("Review \(child.title)")
+                } else {
+                    row(child, chevron: false)
                 }
             }
             if group.children.count > top.count {
@@ -200,6 +206,27 @@ struct CleanupIncludesList: View {
             }
         }
         .padding(.top, Spacing.xs)
+    }
+
+    private func row(_ child: ScanGroup, chevron: Bool) -> some View {
+        HStack(spacing: Spacing.s) {
+            Image(systemName: child.symbol)
+                .font(.system(size: 11))
+                .foregroundStyle(Ink.tertiary)
+                .frame(width: 16)
+            Text(child.title)
+                .font(SpruceFont.callout)
+                .foregroundStyle(Ink.primary)
+                .lineLimit(1)
+            Spacer(minLength: Spacing.s)
+            SizeBadge(bytes: child.totalSize)
+            if chevron {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(Ink.tertiary)
+            }
+        }
+        .contentShape(Rectangle())
     }
 }
 
