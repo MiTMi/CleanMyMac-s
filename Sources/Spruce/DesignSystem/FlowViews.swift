@@ -1,5 +1,6 @@
 import Accessibility
 import AppKit
+import Observation
 import QuickLook
 import SpruceCore
 import SpruceMac
@@ -310,6 +311,10 @@ struct ReviewSplitView: View {
     @State private var groupSort: PrismGroupSort = .size
     @State private var itemSort: PrismItemSort = .size
     @State private var search = ""
+    /// The row File › Quick Look / Reveal in Finder / Copy Path / Ignore act on.
+    @State private var rowFocus = PrismReviewRowFocus()
+    /// File › Quick Look (rows keep their own preview for the hover button).
+    @State private var menuPreviewURL: URL?
     @Environment(\.colorSchemeContrast) private var contrast
 
     var body: some View {
@@ -433,7 +438,15 @@ struct ReviewSplitView: View {
                     ScrollView {
                         LazyVStack(spacing: 0) {
                             ForEach(items) { item in
-                                ItemRow(item: item, module: module, onToggle: { toggle(item) }, onIgnore: onIgnore)
+                                ItemRow(item: item, module: module,
+                                        onToggle: {
+                                            rowFocus.focus(item.id)
+                                            toggle(item)
+                                        },
+                                        onIgnore: onIgnore,
+                                        onHover: { inside in
+                                            if inside { rowFocus.focus(item.id) }
+                                        })
                                 Rectangle().fill(ink.hairline).frame(height: 1).padding(.leading, 56)
                             }
                         }
@@ -441,6 +454,9 @@ struct ReviewSplitView: View {
                 }
             }
             .prismSurface(radius: Radius.container)
+            .modifier(PrismReviewRowsPublisher(focus: rowFocus, items: items, onIgnore: onIgnore,
+                                               onQuickLook: { menuPreviewURL = $0 }))
+            .quickLookPreview($menuPreviewURL)
             .id(group.id)
             .transition(.opacity)
         } else {
@@ -583,6 +599,49 @@ private struct PrismSortMenu<Option: Hashable & RawRepresentable & CaseIterable>
     }
 }
 
+/// The review row the pointer last rested on (or that was last clicked). A reference
+/// type the review list never reads, so hovering re-renders only the modifier below,
+/// not the list.
+@Observable
+final class PrismReviewRowFocus {
+    private(set) var itemID: String?
+
+    func focus(_ id: String) {
+        if itemID != id { itemID = id }
+    }
+}
+
+/// Publishes the focused review row to the File menu (Quick Look ⌘Y, Reveal in Finder,
+/// Copy Path, Ignore) with `.focusedSceneValue(\.spruceRows, …)`. Only this modifier
+/// reads the focus, so a new focused row doesn't rebuild the rows it wraps.
+private struct PrismReviewRowsPublisher: ViewModifier {
+    var focus: PrismReviewRowFocus
+    /// The rows on screen; a focused row that is filtered out or gone publishes nothing.
+    var items: [ScanItem]
+    var onIgnore: ((ScanItem) -> Void)?
+    var onQuickLook: (URL) -> Void
+
+    func body(content: Content) -> some View {
+        content.focusedSceneValue(\.spruceRows, actions)
+    }
+
+    private var actions: SpruceRowActions {
+        guard let id = focus.itemID, let item = items.first(where: { $0.id == id }) else {
+            return SpruceRowActions(urls: [])
+        }
+        var quickLook: (() -> Void)?
+        if let url = item.url {
+            let open = onQuickLook
+            quickLook = { open(url) }
+        }
+        var ignore: (() -> Void)?
+        if let onIgnore {
+            ignore = { onIgnore(item) }
+        }
+        return SpruceRowActions(urls: item.url.map { [$0] } ?? [], quickLook: quickLook, ignore: ignore)
+    }
+}
+
 private struct PrismCategoryHeaderRow: View {
     var group: ScanGroup
     var depth: Int
@@ -695,6 +754,8 @@ struct ItemRow: View {
     var onIgnore: ((ScanItem) -> Void)? = nil
     /// Ask before selecting a `.risky` item (safety rule 3).
     var confirmsRisky: Bool = true
+    /// Told when the pointer enters (true) or leaves (false) the row.
+    var onHover: ((Bool) -> Void)? = nil
 
     @State private var hovering = false
     @State private var confirmRisky = false
@@ -738,7 +799,10 @@ struct ItemRow: View {
         .background(Rectangle().fill(hovering ? ink.subtleFill : Color.clear))
         .contentShape(Rectangle())
         .onTapGesture(perform: requestToggle)
-        .onHover { hovering = $0 }
+        .onHover { inside in
+            hovering = inside
+            onHover?(inside)
+        }
         .animation(Motion.quick, value: hovering)
         .contextMenu { contextMenuItems }
         .help(helpText)
@@ -910,7 +974,8 @@ struct ResultsFooter: View {
 // MARK: - Done
 
 /// Completion screen: calm lens, one-shot particle burst, freed-bytes count-up,
-/// stat chips, failures, completion sound and a VoiceOver announcement.
+/// stat chips, what went to the Trash (Open Trash / Put Back All), failures,
+/// completion sound and a VoiceOver announcement.
 struct DoneView: View {
     var module: ModuleID
     var outcome: RunOutcome
@@ -918,6 +983,12 @@ struct DoneView: View {
     var doneTitle: String = "Done"
     /// Play the completion sound (honours Settings › Play sounds).
     var playsSound: Bool = true
+    /// The flow whose run `outcome` is: Put Back All then goes through
+    /// `ScanFlowModel.putBack()`, so the flow keeps the result. Without one, the Trash
+    /// card puts the run back through `TrashLedger` itself.
+    var flow: ScanFlowModel? = nil
+    /// When set, Put Back All asks first with this message (e.g. for removed threats).
+    var putBackConfirmation: String? = nil
     var onDone: () -> Void
 
     @State private var shownBytes: Double = 0
@@ -947,6 +1018,9 @@ struct DoneView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             statChips
+            if DoneTrashCard.applies(to: outcome) {
+                DoneTrashCard(module: module, outcome: outcome, flow: flow, confirmation: putBackConfirmation)
+            }
             if !outcome.failures.isEmpty {
                 failuresCard
             }
@@ -978,12 +1052,12 @@ struct DoneView: View {
         } else if outcome.freedBytes > 0 {
             VStack(spacing: 0) {
                 PrismCountingBytes(value: shownBytes, font: SpruceFont.metricXL, unitFont: .system(size: 20, weight: .medium))
-                Text("freed up")
+                Text(freedCaption)
                     .font(SpruceFont.headline)
                     .foregroundStyle(PrismInk(contrast).secondary)
             }
             .accessibilityElement(children: .ignore)
-            .accessibilityLabel("\(ByteFormat.string(outcome.freedBytes)) freed up")
+            .accessibilityLabel("\(ByteFormat.string(outcome.freedBytes)) \(freedCaption)")
             .accessibilityAddTraits(.isHeader)
         } else {
             Text(outcome.failures.isEmpty ? "All done" : "Finished, with a few exceptions")
@@ -994,12 +1068,24 @@ struct DoneView: View {
         }
     }
 
+    /// True when everything the run freed went to the Trash (it comes back once the
+    /// Trash is emptied).
+    private var allMovedToTrash: Bool {
+        outcome.trashedBytes > 0 && outcome.trashedBytes >= outcome.freedBytes
+    }
+
+    private var freedCaption: String {
+        allMovedToTrash ? "moved to the Trash" : "freed up"
+    }
+
     @ViewBuilder
     private var statChips: some View {
         let p = module.palette
         let chips = HStack(spacing: Spacing.s) {
             if outcome.freedBytes > 0 {
-                PrismStatChip(symbol: "arrow.down.circle.fill", value: ByteFormat.string(outcome.freedBytes), label: "Freed", tint: p.accentText)
+                PrismStatChip(symbol: allMovedToTrash ? "trash.circle.fill" : "arrow.down.circle.fill",
+                              value: ByteFormat.string(outcome.freedBytes),
+                              label: allMovedToTrash ? "In the Trash" : "Freed", tint: p.accentText)
             }
             if outcome.processedCount > 0 {
                 PrismStatChip(symbol: "checkmark.circle.fill", value: CountFormat.grouped(outcome.processedCount),
@@ -1057,7 +1143,7 @@ struct DoneView: View {
         if let headline {
             announcement = headline
         } else if outcome.freedBytes > 0 {
-            announcement = "Done. \(ByteFormat.string(outcome.freedBytes)) freed up."
+            announcement = "Done. \(ByteFormat.string(outcome.freedBytes)) \(freedCaption)."
         } else {
             announcement = "Done."
         }
@@ -1065,6 +1151,175 @@ struct DoneView: View {
             announcement += " \(CountFormat.items(outcome.failures.count)) couldn't be completed."
         }
         AccessibilityNotification.Announcement(announcement).post()
+    }
+}
+
+/// What a run moved to the Trash: "3 items (1.2 GB) are in the Trash. Empty it to get
+/// the space back." with Open Trash and Put Back All (`RunOutcome.trashedCount` /
+/// `trashedBytes` / `trashRunIDs`, `TrashLedger`). Put Back restores only items still
+/// in the Trash whose original place is free; items moved as administrator stay.
+private struct DoneTrashCard: View {
+    var module: ModuleID
+    var outcome: RunOutcome
+    var flow: ScanFlowModel?
+    var confirmation: String?
+
+    @State private var localRestorable: Int?
+    @State private var localResult: TrashPutBackResult?
+    @State private var localWorking = false
+    @State private var confirming = false
+    @Environment(\.colorSchemeContrast) private var contrast
+
+    static func applies(to outcome: RunOutcome) -> Bool {
+        outcome.trashedCount > 0 || outcome.trashedBytes > 0 || !outcome.trashRunIDs.isEmpty
+    }
+
+    /// The flow, when it holds this very run (its Put Back state then applies).
+    private var activeFlow: ScanFlowModel? {
+        guard let flow, flow.phase == .done, let runIDs = flow.outcome?.trashRunIDs,
+              !runIDs.isEmpty, runIDs == outcome.trashRunIDs else { return nil }
+        return flow
+    }
+
+    private var restorable: Int {
+        if let activeFlow { return activeFlow.restorableCount }
+        return localRestorable ?? 0
+    }
+
+    private var result: TrashPutBackResult? {
+        if let activeFlow { return activeFlow.putBackResult }
+        return localResult
+    }
+
+    private var working: Bool {
+        if let activeFlow { return activeFlow.isPuttingBack }
+        return localWorking
+    }
+
+    var body: some View {
+        let ink = PrismInk(contrast)
+        let p = module.palette
+        GlassCard(padding: Spacing.m, radius: Radius.container) {
+            HStack(alignment: .center, spacing: Spacing.m) {
+                Image(systemName: result?.restored.isEmpty == false ? "arrow.uturn.backward" : "trash")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(p.accentText)
+                    .frame(width: 32, height: 32)
+                    .background(Circle().fill(p.accent.opacity(0.16)))
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(SpruceFont.bodyStrong)
+                        .foregroundStyle(Ink.primary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text(detail)
+                        .font(SpruceFont.caption)
+                        .foregroundStyle(ink.secondary)
+                        .lineLimit(3)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .accessibilityElement(children: .combine)
+                Spacer(minLength: Spacing.s)
+                CapsuleButton(title: "Open Trash", symbol: "trash") { TrashLedger.openTrash() }
+                if restorable > 0 || working {
+                    CapsuleButton(title: working ? "Putting Back…" : "Put Back All", symbol: "arrow.uturn.backward") {
+                        requestPutBack()
+                    }
+                    .disabled(working)
+                    .help("Moves the items back to where they were")
+                }
+            }
+        }
+        .frame(maxWidth: 560)
+        .task(id: outcome.trashRunIDs) { await loadRestorable() }
+        .onChange(of: result) { _, new in
+            if let new { AccessibilityNotification.Announcement(new.summary).post() }
+        }
+        .confirmationDialog("Put back \(CountFormat.items(restorable))?", isPresented: $confirming,
+                            titleVisibility: .visible) {
+            Button("Put Back All") { putBack() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(confirmation ?? "")
+        }
+    }
+
+    // MARK: Text
+
+    private var countText: String {
+        let count = max(outcome.trashedCount, restorable)
+        let items = count > 0 ? CountFormat.items(count) : "Some items"
+        return outcome.trashedBytes > 0 ? "\(items) (\(ByteFormat.string(outcome.trashedBytes)))" : items
+    }
+
+    private var title: String {
+        if let result, !(result.restored.isEmpty && result.failures.isEmpty) { return result.summary }
+        let count = max(outcome.trashedCount, restorable)
+        return count == 1 ? "\(countText) is in the Trash" : "\(countText) are in the Trash"
+    }
+
+    private var detail: String {
+        if let result, !(result.restored.isEmpty && result.failures.isEmpty) {
+            if let failure = result.failures.first {
+                return result.failures.count == 1
+                    ? "\(failure.title): \(failure.reason)"
+                    : "\(failure.title): \(failure.reason) (and \(CountFormat.grouped(result.failures.count - 1)) more)"
+            }
+            return restorable > 0
+                ? "They're back where they were. \(CountFormat.items(restorable)) can still be put back."
+                : "They're back where they were."
+        }
+        return "Empty the Trash to get the space back."
+    }
+
+    // MARK: Actions
+
+    private func requestPutBack() {
+        guard !working, restorable > 0 else { return }
+        if let confirmation, !confirmation.isEmpty {
+            confirming = true
+        } else {
+            putBack()
+        }
+    }
+
+    private func putBack() {
+        if let activeFlow {
+            activeFlow.putBack()
+            return
+        }
+        let runIDs = outcome.trashRunIDs
+        guard !runIDs.isEmpty, !localWorking else { return }
+        localWorking = true
+        let module = self.module
+        Task { @MainActor in
+            let (done, remaining) = await Task.detached(priority: .userInitiated) { () -> (TrashPutBackResult, Int) in
+                let restored = TrashLedger.shared.putBack(runIDs: runIDs)
+                return (restored, TrashLedger.shared.restorable(runIDs: runIDs).count)
+            }.value
+            localResult = done
+            localRestorable = remaining
+            localWorking = false
+            if !done.restored.isEmpty {
+                OperationLog.shared.record(module: module, action: "put-back-run", result: "ok",
+                                           detail: "\(done.restored.count) item(s)")
+            }
+        }
+    }
+
+    /// Counts the run's items that can still be put back (off the main thread: it reads
+    /// the ledger and checks each item in the Trash).
+    private func loadRestorable() async {
+        guard activeFlow == nil else { return }
+        let runIDs = outcome.trashRunIDs
+        guard !runIDs.isEmpty else {
+            localRestorable = 0
+            return
+        }
+        let count = await Task.detached(priority: .utility) {
+            TrashLedger.shared.restorable(runIDs: runIDs).count
+        }.value
+        localRestorable = count
     }
 }
 
@@ -1302,6 +1557,8 @@ struct ScanFlowScreen: View {
     var emptyMessage: String = "Nothing here needs attention right now."
 
     @State private var scanStartedAt: Date?
+    /// Scan › Run Selected… asks here first (the orb runs directly).
+    @State private var confirmMenuRun = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
@@ -1320,7 +1577,30 @@ struct ScanFlowScreen: View {
                 }
                 scanStartedAt = nil
             }
+            if newKey != "results" { confirmMenuRun = false }
         }
+        .focusedSceneValue(\.spruceFlow, menuActions)
+        .confirmationDialog(menuRunTitle, isPresented: $confirmMenuRun, titleVisibility: .visible) {
+            Button(actionTitle, role: .destructive) {
+                if flow.phase == .results { flow.run() }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("\(ByteFormat.string(flow.selectedSize)) selected. Only the selected items are touched.")
+        }
+    }
+
+    /// Scan and Edit menu actions; Run Selected… only opens the confirmation above.
+    private var menuActions: SpruceFlowActions {
+        var actions = flow.menuActions
+        if flow.phase == .results && flow.selectedCount > 0 {
+            actions.reviewAndRun = { confirmMenuRun = true }
+        }
+        return actions
+    }
+
+    private var menuRunTitle: String {
+        "\(actionTitle) \(CountFormat.items(flow.selectedCount))?"
     }
 
     private var phaseKey: String {
@@ -1351,7 +1631,7 @@ struct ScanFlowScreen: View {
             ScanningView(module: flow.module, progress: flow.progress, title: "Working…")
         case .done:
             if let outcome = flow.outcome {
-                DoneView(module: flow.module, outcome: outcome) { flow.showRemaining() }
+                DoneView(module: flow.module, outcome: outcome, flow: flow) { flow.showRemaining() }
             } else {
                 EmptyStateView(module: flow.module, title: "All done", message: "Nothing else to do here.",
                                actionTitle: "Back", action: { flow.showRemaining() })

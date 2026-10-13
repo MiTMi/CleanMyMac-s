@@ -198,22 +198,36 @@ public enum CleanupPaths {
 /// Maps cache folders to the app that owns them, and decides whether that app is running.
 public enum CleanupOwnership {
 
-    /// Folders that are named after a vendor rather than a bundle identifier.
-    static let knownFolderOwners: [String: String] = [
-        "google": "com.google.Chrome",
-        "firefox": "org.mozilla.firefox",
-        "mozilla": "org.mozilla.firefox",
-        "bravesoftware": "com.brave.Browser",
-        "microsoft edge": "com.microsoft.edgemac",
-        "vivaldi": "com.vivaldi.Vivaldi",
-        "opera software": "com.operasoftware.Opera",
-        "slack": "com.tinyspeck.slackmacgap",
-        "spotify": "com.spotify.client",
-        "zoom": "us.zoom.xos",
-        "discord": "com.hnc.Discord",
-        "code": "com.microsoft.VSCode",
-        "cursor": "com.todesktop.230313mzl4w4u92",
+    /// Every Firefox channel: they share one `Firefox`/`Mozilla` folder (and its profiles).
+    static let firefoxChannels = [
+        "org.mozilla.firefox",
+        "org.mozilla.firefoxdeveloperedition",
+        "org.mozilla.nightly",
+        "org.mozilla.firefoxbeta",
     ]
+
+    /// Folders that are named after a vendor rather than a bundle identifier, and the
+    /// apps that use them (the first is the main one: its name titles the row).
+    static let knownFolderOwners: [String: [String]] = [
+        "google": ["com.google.Chrome"],
+        "firefox": firefoxChannels,
+        "mozilla": firefoxChannels,
+        "bravesoftware": ["com.brave.Browser"],
+        "microsoft edge": ["com.microsoft.edgemac"],
+        "vivaldi": ["com.vivaldi.Vivaldi"],
+        "opera software": ["com.operasoftware.Opera"],
+        "slack": ["com.tinyspeck.slackmacgap"],
+        "spotify": ["com.spotify.client"],
+        "zoom": ["us.zoom.xos"],
+        "discord": ["com.hnc.Discord"],
+        "code": ["com.microsoft.VSCode"],
+        "cursor": ["com.todesktop.230313mzl4w4u92"],
+    ]
+
+    /// Joins the owners of a folder several apps share in an owner hint
+    /// (`CleanupMetadataKey.owner`), e.g. Firefox's release, Beta, Developer Edition
+    /// and Nightly.
+    public static let ownerSeparator: Character = "|"
 
     /// True for strings shaped like a reverse-DNS bundle identifier.
     public static func looksLikeBundleID(_ name: String) -> Bool {
@@ -223,10 +237,30 @@ public enum CleanupOwnership {
         return name.allSatisfy { $0.isLetter || $0.isNumber || $0 == "." || $0 == "-" || $0 == "_" }
     }
 
-    /// Owner hint for a folder or file name: a bundle id, or a known vendor mapping.
+    /// Every app a folder or file name may belong to: the bundle id it is named after, or
+    /// the apps of a known vendor folder (main app first).
+    public static func owners(forName name: String) -> [String] {
+        if looksLikeBundleID(name) { return [name] }
+        return knownFolderOwners[name.lowercased()] ?? []
+    }
+
+    /// Owner hint for a folder or file name: a bundle id, or a known vendor mapping
+    /// (several apps joined with `ownerSeparator`).
     public static func owner(forName name: String) -> String? {
-        if looksLikeBundleID(name) { return name }
-        return knownFolderOwners[name.lowercased()]
+        let all = owners(forName: name)
+        return all.isEmpty ? nil : all.joined(separator: String(ownerSeparator))
+    }
+
+    /// The bundle ids (or bundle id prefixes) in an owner hint, main app first.
+    public static func owners(in owner: String) -> [String] {
+        owner.split(separator: ownerSeparator)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+    }
+
+    /// The main app of an owner hint (the one whose name titles the row).
+    public static func primaryOwner(of owner: String) -> String? {
+        owners(in: owner).first
     }
 
     /// Owner hint for a group container id such as `UBF8T346G9.Office` or
@@ -255,10 +289,16 @@ public enum CleanupOwnership {
     }
 
     /// Whether `owner` belongs to the running app `bundleID`: equal, or one is a
-    /// reverse-DNS prefix of the other (helpers, ShipIt updaters…).
+    /// reverse-DNS prefix of the other (helpers, ShipIt updaters…). An owner hint that
+    /// names several apps matches any of them.
     public static func matches(owner: String, bundleID: String) -> Bool {
+        owners(in: owner).contains { matchesOne(owner: $0, bundleID: bundleID) }
+    }
+
+    private static func matchesOne(owner: String, bundleID: String) -> Bool {
         let o = owner.lowercased()
         let b = bundleID.lowercased()
+        guard !o.isEmpty, !b.isEmpty else { return false }
         if o == b { return true }
         // Require at least two components on the shorter side so "com" never matches.
         let shorter = o.count < b.count ? o : b

@@ -120,4 +120,28 @@ final class CleanupCatalogTests: XCTestCase {
         XCTAssertFalse(CleanupOwnership.matches(owner: "com.example.application", bundleID: "com.example.app"))
         XCTAssertFalse(CleanupOwnership.matches(owner: "com", bundleID: "com.example.app"))
     }
+
+    func testFirefoxFoldersBelongToEveryFirefoxChannel() {
+        let channels = ["org.mozilla.firefox", "org.mozilla.firefoxdeveloperedition", "org.mozilla.nightly",
+                        "org.mozilla.firefoxbeta"]
+        for name in ["Firefox", "Mozilla", "firefox"] {
+            XCTAssertEqual(CleanupOwnership.owners(forName: name), channels, name)
+            let hint = CleanupOwnership.owner(forName: name)
+            XCTAssertEqual(hint.map(CleanupOwnership.owners(in:)), channels, name)
+            XCTAssertEqual(hint.flatMap(CleanupOwnership.primaryOwner(of:)), "org.mozilla.firefox", name)
+            for channel in channels {
+                XCTAssertTrue(CleanupOwnership.matches(owner: hint ?? "", bundleID: channel), "\(name) / \(channel)")
+                XCTAssertTrue(CleanupOwnership.isRunning(owner: hint ?? "", running: [channel]), "\(name) / \(channel)")
+            }
+            XCTAssertFalse(CleanupOwnership.matches(owner: hint ?? "", bundleID: "org.mozilla.thunderbird"))
+            XCTAssertFalse(CleanupOwnership.isRunning(owner: hint ?? "", running: ["com.google.Chrome", ""]))
+        }
+        // Folders named after one channel's bundle id belong to that channel only.
+        XCTAssertEqual(CleanupOwnership.owner(forName: "org.mozilla.firefox"), "org.mozilla.firefox")
+        XCTAssertFalse(CleanupOwnership.matches(owner: "org.mozilla.firefox", bundleID: "org.mozilla.nightly"))
+        // Single-owner vendor folders are unchanged.
+        XCTAssertEqual(CleanupOwnership.owners(forName: "Google"), ["com.google.Chrome"])
+        XCTAssertEqual(CleanupOwnership.owners(forName: "Homebrew"), [])
+        XCTAssertNil(CleanupOwnership.owner(forName: "Homebrew"))
+    }
 }

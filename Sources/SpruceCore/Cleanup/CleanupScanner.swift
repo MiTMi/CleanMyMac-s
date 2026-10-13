@@ -342,7 +342,9 @@ public struct CleanupScanner: Sendable {
             d.metadata[CleanupMetadataKey.owner] = owner
             switch rule.gate {
             case .ownerAtWildcard, .ownerFromFileName:
-                if CleanupOwnership.looksLikeBundleID(owner) { d.metadata[CleanupMetadataKey.bundleID] = owner }
+                if let primary = CleanupOwnership.primaryOwner(of: owner), CleanupOwnership.looksLikeBundleID(primary) {
+                    d.metadata[CleanupMetadataKey.bundleID] = primary
+                }
             default:
                 break
             }
@@ -353,7 +355,7 @@ public struct CleanupScanner: Sendable {
             d.note = "\(blocker) — quit it to clean this. " + d.note
         }
         if !rule.reviewNames.isEmpty {
-            let names = [d.entry.name, owner].compactMap { $0 }
+            let names = [d.entry.name] + (owner.map(CleanupOwnership.owners(in:)) ?? [])
             if names.contains(where: { CleanupPaths.matchesAny($0, rule.reviewNames) }) {
                 if d.safety == .safe { d.safety = .review }
                 d.selected = false
@@ -550,8 +552,13 @@ public struct CleanupScanner: Sendable {
             else { return nil }
             return "\(displayName(for: running)) is open"
         case .ownerAtWildcard, .ownerFromFileName:
-            guard let owner, CleanupOwnership.isRunning(owner: owner, running: context.runningBundleIDs) else { return nil }
-            return "\(displayName(for: owner)) is open"
+            // A shared folder (Firefox's channels) is in use when any of its apps is open.
+            guard let owner,
+                  let running = CleanupOwnership.owners(in: owner).first(where: {
+                      CleanupOwnership.isRunning(owner: $0, running: context.runningBundleIDs)
+                  })
+            else { return nil }
+            return "\(displayName(for: running)) is open"
         }
     }
 
@@ -591,7 +598,7 @@ public struct CleanupScanner: Sendable {
         if case .ownerAtWildcard = rule.gate, let w = pattern.firstWildcardIndex {
             let comps = CleanupPaths.components(path)
             let wildName = w < comps.count ? comps[w] : entry.name
-            let app = owner.flatMap { context.appName?($0) } ?? wildName
+            let app = owner.flatMap(CleanupOwnership.primaryOwner(of:)).flatMap { context.appName?($0) } ?? wildName
             return comps.count - 1 == w ? app : "\(app) · \(entry.name)"
         }
         return entry.name

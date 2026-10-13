@@ -37,9 +37,10 @@ public struct CleanupRunBreakdown: Codable, Hashable, Sendable {
     public var cleanedOutsideTrash: Bool { cleanedCount > 0 || deletedBytes > 0 || trashedBytes > 0 }
 }
 
-/// The result of one Cleanup run: the outcome the Done screen shows (its `freedBytes`
-/// is disk space given back right away: deleted junk plus emptied Trash) and the split
-/// the activity history records.
+/// The result of one Cleanup run: the outcome the Done screen shows and the split the
+/// activity history records. The outcome's `freedBytes` counts everything the run deleted,
+/// emptied from a Trash bin or moved to the Trash; `trashedBytes` / `trashedCount` /
+/// `trashRunIDs` describe the moved-to-Trash part (for Put Back), as `FileRemover` does.
 public struct CleanupRunReport: Hashable, Sendable {
     public var outcome: RunOutcome
     public var breakdown: CleanupRunBreakdown
@@ -71,7 +72,9 @@ public enum CleanupHistory {
     ///
     /// A run that did neither (only failures, or nothing to do) yields one `.clean`
     /// record with the run's own summary, so it still shows up in the history. Every
-    /// record keeps the run's date, removed item ids and failures.
+    /// record keeps the run's date, removed item ids and failures; only the `.clean`
+    /// record keeps what was moved to the Trash (`trashedBytes`, `trashedCount`,
+    /// `trashRunIDs`), so the first record can put the run back.
     public static func records(for report: CleanupRunReport) -> [Record] {
         let b = report.breakdown
         let full = report.outcome
@@ -88,6 +91,10 @@ public enum CleanupHistory {
             part.freedBytes = max(0, b.emptiedBytes)
             part.processedCount = max(0, b.emptiedCount)
             part.summary = emptiedSummary(b)
+            // Emptying deletes for good: nothing of this part is in the Trash.
+            part.trashedBytes = 0
+            part.trashedCount = 0
+            part.trashRunIDs = []
             records.append(Record(outcome: part, kind: .other))
         }
         return records

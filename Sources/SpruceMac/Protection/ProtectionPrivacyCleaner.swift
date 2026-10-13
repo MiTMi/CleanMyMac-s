@@ -122,6 +122,9 @@ public final class ProtectionPrivacyCleaner: GroupScanner, @unchecked Sendable {
         var failures: [ItemFailure] = []
         var removed: [String] = []
         var freed: Int64 = 0
+        var trashedBytes: Int64 = 0
+        var trashedCount = 0
+        var trashRunIDs: [UUID] = []
 
         var disposeItems: [ScanItem] = []
         var filesByPlan: [(plan: ProtectionPrivacyPlan, ids: [String])] = []
@@ -194,6 +197,9 @@ public final class ProtectionPrivacyCleaner: GroupScanner, @unchecked Sendable {
                                       bytesFound: p.bytesFound))
             })
             freed += outcome.freedBytes
+            trashedBytes += outcome.trashedBytes
+            trashedCount += outcome.trashedCount
+            trashRunIDs += outcome.trashRunIDs
             let done = Set(outcome.removedItemIDs)
             var reasons: [String: String] = [:]
             for failure in outcome.failures where reasons[failure.itemID] == nil {
@@ -243,6 +249,7 @@ public final class ProtectionPrivacyCleaner: GroupScanner, @unchecked Sendable {
             ? "No privacy items were cleared"
             : "Cleared \(CountFormat.items(removed.count, singular: "privacy item")) · \(ByteFormat.string(freed))"
         return RunOutcome(module: .protection, freedBytes: freed, processedCount: removed.count, removedItemIDs: removed,
-                          failures: failures, summary: summary)
+                          failures: failures, summary: summary,
+                          trashedBytes: trashedBytes, trashedCount: trashedCount, trashRunIDs: trashRunIDs)
     }
 }

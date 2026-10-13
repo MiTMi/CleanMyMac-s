@@ -13,6 +13,8 @@ struct CheckupView: View {
 
     @Environment(AppModel.self) private var model
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// Scan › Run Selected… asks here first (the Run orb runs directly).
+    @State private var confirmMenuRun = false
     private var session: CheckupSession { CheckupSession.shared }
 
     init() {}
@@ -26,6 +28,65 @@ struct CheckupView: View {
         .animation(Motion.adaptive(Motion.standard, reduceMotion: reduceMotion), value: session.phase)
         .onAppear { handle(tool: model.pendingTool) }
         .onChange(of: model.pendingTool) { _, tool in handle(tool: tool) }
+        .onChange(of: session.phase) { _, phase in
+            if phase != .results { confirmMenuRun = false }
+        }
+        .focusedSceneValue(\.spruceFlow, menuActions)
+        .confirmationDialog(menuRunTitle, isPresented: $confirmMenuRun, titleVisibility: .visible) {
+            Button("Run") {
+                // `requestRun` still asks to quit apps that hold up selected items.
+                session.requestRun()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Only what's selected is touched. Checkup runs the areas one after another.")
+        }
+    }
+
+    // MARK: Main menu
+
+    /// Scan and Edit menu actions for the current phase. Run Selected… only opens the
+    /// confirmation above; nothing is offered while a review sheet or the quit-apps
+    /// prompt is open.
+    private var menuActions: SpruceFlowActions {
+        var actions = SpruceFlowActions()
+        let modules = model.settings.settings.checkupModules
+        switch session.phase {
+        case .idle, .done:
+            if !modules.isEmpty { actions.scanAgain = { startScan() } }
+        case .scanning:
+            actions.stop = { session.stopScan() }
+        case .running:
+            if !session.stopRequested { actions.stop = { session.requestStop() } }
+        case .results:
+            let blocked = session.isReviewing || session.quitPrompt != nil || session.isWaitingForApps
+                || !session.rescanning.isEmpty
+            guard !blocked else { break }
+            if !modules.isEmpty { actions.scanAgain = { requestScanAgain() } }
+            let summary = session.summary
+            if !summary.isEmpty { actions.reviewAndRun = { confirmMenuRun = true } }
+            if summary.selectableCount > 0 {
+                actions.selectAll = { session.setAllTiles(selected: true) }
+                actions.deselectAll = { session.setAllTiles(selected: false) }
+                actions.selectRecommended = { session.selectRecommendedTiles() }
+            }
+        }
+        return actions
+    }
+
+    private var menuRunTitle: String {
+        let count = session.summary.modules.count
+        return "Run \(CountFormat.items(count, singular: "area"))?"
+    }
+
+    /// Scan Again from the menu on the results screen: asks first when it would clear
+    /// the tiles and review choices the user set (the results screen shows the alert).
+    private func requestScanAgain() {
+        if session.hasCustomChoices {
+            session.scanAgainPrompt = true
+        } else {
+            startScan()
+        }
     }
 
     @ViewBuilder

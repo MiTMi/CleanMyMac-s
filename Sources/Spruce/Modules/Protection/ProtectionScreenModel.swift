@@ -162,7 +162,10 @@ final class ProtectionScreenModel {
 
     fileprivate init(engine: ProtectionEngine) {
         self.engine = engine
-        malware = ScanFlowModel(module: .protection, scanner: engine, historyKind: ProtectionTool.malware.historyKind)
+        // The engine records each malware scan as `.malwareScan` itself (Activity's health
+        // reads its threat count), so the flow doesn't add a generic `.scan` entry.
+        malware = ScanFlowModel(module: .protection, scanner: engine, historyKind: ProtectionTool.malware.historyKind,
+                                recordsScanHistory: false)
         privacy = ScanFlowModel(module: .protection, scanner: engine.privacy, historyKind: ProtectionTool.privacy.historyKind)
         permissions = ScanFlowModel(module: .protection, scanner: engine.permissions,
                                     historyKind: ProtectionTool.permissions.historyKind)

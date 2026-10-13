@@ -23,6 +23,10 @@ final class ScanFlowModel {
     let scanner: GroupScanner
     /// What kind of history entry a successful run records.
     var historyKind: ActivityEntry.Kind
+    /// Whether a finished scan is recorded as a generic `.scan` history entry. Off for
+    /// flows whose scanner records its own kind (Protection's malware scan records
+    /// `.malwareScan`, which `ActivityHealth.unresolvedThreats` reads).
+    let recordsScanHistory: Bool
 
     private(set) var phase: Phase = .idle
     private(set) var progress = ScanProgress(message: "")
@@ -33,13 +37,17 @@ final class ScanFlowModel {
     private(set) var restorableCount = 0
     /// The result of the last `putBack()`.
     private(set) var putBackResult: TrashPutBackResult?
+    /// True while `putBack()` is moving items back.
+    private(set) var isPuttingBack = false
 
     private var task: Task<Void, Never>?
 
-    init(module: ModuleID, scanner: GroupScanner, historyKind: ActivityEntry.Kind = .clean) {
+    init(module: ModuleID, scanner: GroupScanner, historyKind: ActivityEntry.Kind = .clean,
+         recordsScanHistory: Bool = true) {
         self.module = module
         self.scanner = scanner
         self.historyKind = historyKind
+        self.recordsScanHistory = recordsScanHistory
     }
 
     // MARK: Derived
@@ -73,9 +81,11 @@ final class ScanFlowModel {
                 self.groups = SettingsStore.shared.settings.filteringIgnored(result)
                 self.lastScanDate = Date()
                 self.phase = .results
-                HistoryStore.shared.record(ActivityEntry(module: self.module, kind: .scan, bytes: self.groups.totalSize,
-                                                         count: self.groups.allItems.count,
-                                                         summary: "Found \(ByteFormat.string(self.groups.totalSize))"))
+                if self.recordsScanHistory {
+                    HistoryStore.shared.record(ActivityEntry(module: self.module, kind: .scan, bytes: self.groups.totalSize,
+                                                             count: self.groups.allItems.count,
+                                                             summary: "Found \(ByteFormat.string(self.groups.totalSize))"))
+                }
             } catch {
                 guard let self, !Task.isCancelled else { return }
                 self.phase = (error as? SpruceError) == .cancelled ? .idle : .failed(error.localizedDescription)
@@ -126,12 +136,14 @@ final class ScanFlowModel {
     /// Moves the last run's trashed items back where they were (only those still in the
     /// Trash whose original place is free).
     func putBack() {
-        guard let runIDs = outcome?.trashRunIDs, !runIDs.isEmpty else { return }
+        guard !isPuttingBack, let runIDs = outcome?.trashRunIDs, !runIDs.isEmpty else { return }
+        isPuttingBack = true
         Task { [weak self] in
             let result = await Task.detached(priority: .userInitiated) {
                 TrashLedger.shared.putBack(runIDs: runIDs)
             }.value
             guard let self else { return }
+            self.isPuttingBack = false
             self.putBackResult = result
             self.restorableCount = TrashLedger.shared.restorable(runIDs: runIDs).count
             if !result.restored.isEmpty {
@@ -196,6 +208,17 @@ final class ScanFlowModel {
 
     func selectAll(_ selected: Bool) {
         for i in groups.indices { groups[i].setAllSelected(selected) }
+    }
+
+    /// Back to the default selection: only `safe` items (safety rule 3).
+    func selectRecommended() {
+        func apply(_ group: inout ScanGroup) {
+            for i in group.items.indices { group.items[i].isSelected = group.items[i].safety == .safe }
+            for j in group.children.indices { apply(&group.children[j]) }
+        }
+        var updated = groups
+        for i in updated.indices { apply(&updated[i]) }
+        groups = updated
     }
 
     func ignore(_ item: ScanItem) {

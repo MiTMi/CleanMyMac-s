@@ -197,7 +197,6 @@ public final class CleanupEngine: CheckupContributor, GroupScanner, @unchecked S
         var items: [ScanItem]
         var options: PathGuard.Options
         var escalate: Bool
-        var movesToTrash: Bool
         /// Deletes Trash-bin contents (recorded apart from the rest of the run).
         var emptiesTrash = false
     }
@@ -265,14 +264,14 @@ public final class CleanupEngine: CheckupContributor, GroupScanner, @unchecked S
         let adminItems = allTargets.filter { needsAdmin($0) && !isTrashBin($0) && !isLaunchItem($0) }
         let userItems = allTargets.filter { !needsAdmin($0) && !isTrashBin($0) && !isLaunchItem($0) }
         let batches = [
-            Batch(items: userItems.filter { $0.deletion == .remove }, options: [], escalate: false, movesToTrash: false),
-            Batch(items: userItems.filter { $0.deletion == .trash }, options: [], escalate: false, movesToTrash: true),
-            Batch(items: launchItems, options: [.allowLaunchItems], escalate: false, movesToTrash: true),
+            Batch(items: userItems.filter { $0.deletion == .remove }, options: [], escalate: false),
+            Batch(items: userItems.filter { $0.deletion == .trash }, options: [], escalate: false),
+            Batch(items: launchItems, options: [.allowLaunchItems], escalate: false),
             // Root-owned system caches and logs: one administrator prompt at most.
-            Batch(items: adminItems, options: [], escalate: true, movesToTrash: false),
+            Batch(items: adminItems, options: [], escalate: true),
             // Emptying the Trash: trashed apps are whole bundles, and root-owned items
             // left by installers need the administrator.
-            Batch(items: trashBins, options: [.allowAppBundles], escalate: true, movesToTrash: false, emptiesTrash: true),
+            Batch(items: trashBins, options: [.allowAppBundles], escalate: true, emptiesTrash: true),
         ]
 
         // Unload broken launch agents before their plists move to the Trash.
@@ -284,10 +283,12 @@ public final class CleanupEngine: CheckupContributor, GroupScanner, @unchecked S
 
         let totalBytes = max(allTargets.reduce(Int64(0)) { $0 + max($1.size, 1) }, 1)
         var processedBytes: Int64 = 0
+        /// Deleted outright (including what was emptied from the Trash bins).
         var freed: Int64 = 0
         var emptiedBytes: Int64 = 0
         var trashedBytes: Int64 = 0
         var trashedCount = 0
+        var trashRunIDs: [UUID] = []
         var removedTargets = Set<String>()
         var targetFailures: [ItemFailure] = []
         for batch in batches where !batch.items.isEmpty {
@@ -295,7 +296,7 @@ public final class CleanupEngine: CheckupContributor, GroupScanner, @unchecked S
             let batchBytes = batch.items.reduce(Int64(0)) { $0 + max($1.size, 1) }
             let baseFraction = Double(processedBytes) / Double(totalBytes)
             let share = Double(batchBytes) / Double(totalBytes)
-            let freedBefore = freed
+            let freedBefore = freed + trashedBytes
             let outcome = await remover.dispose(batch.items, module: module, options: batch.options, settings: settings,
                                                 escalate: batch.escalate, progress: { p in
                 progress(ScanProgress(fraction: baseFraction + (p.fraction ?? 0) * share, message: p.message,
@@ -304,13 +305,14 @@ public final class CleanupEngine: CheckupContributor, GroupScanner, @unchecked S
             processedBytes += batchBytes
             removedTargets.formUnion(outcome.removedItemIDs)
             targetFailures += outcome.failures
-            if batch.movesToTrash {
-                trashedBytes += outcome.freedBytes
-                trashedCount += outcome.removedItemIDs.count
-            } else {
-                freed += outcome.freedBytes
-                if batch.emptiesTrash { emptiedBytes += outcome.freedBytes }
-            }
+            // FileRemover counts what it moved to the Trash (also as administrator) as
+            // freed; keep that part apart, with its ledger runs for Put Back.
+            let deleted = max(0, outcome.freedBytes - outcome.trashedBytes)
+            freed += deleted
+            if batch.emptiesTrash { emptiedBytes += deleted }
+            trashedBytes += outcome.trashedBytes
+            trashedCount += outcome.trashedCount
+            trashRunIDs += outcome.trashRunIDs
         }
         let cancelled = Task.isCancelled
 
@@ -339,14 +341,17 @@ public final class CleanupEngine: CheckupContributor, GroupScanner, @unchecked S
             trashedCount: trashedCount, trashedBytes: trashedBytes,
             emptiedCount: emptiedRows, emptiedBytes: emptiedBytes
         )
-        progress(ScanProgress(fraction: 1, message: "Done", bytesFound: freed))
+        progress(ScanProgress(fraction: 1, message: "Done", bytesFound: freed + trashedBytes))
         let outcome = RunOutcome(
             module: module,
-            freedBytes: freed,
+            freedBytes: freed + trashedBytes,
             processedCount: removedRows.count,
             removedItemIDs: removedRows,
             failures: failures,
-            summary: CleanupHistory.runSummary(breakdown)
+            summary: CleanupHistory.runSummary(breakdown),
+            trashedBytes: trashedBytes,
+            trashedCount: trashedCount,
+            trashRunIDs: trashRunIDs
         )
         return CleanupRunReport(outcome: outcome, breakdown: breakdown)
     }

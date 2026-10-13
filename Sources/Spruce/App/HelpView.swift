@@ -213,7 +213,7 @@ enum HelpContent {
             return [module.tagline] + moduleDetail(module)
         case .safety:
             return [
-                "Spruce moves files to the Trash by default, so you can put them back. Only caches, logs and temporary files that rebuild themselves are deleted directly.",
+                "Spruce moves files to the Trash by default, so you can put them back: the completion screen's Put Back All returns a whole run while its items are still in the Trash. Only caches, logs and temporary files that rebuild themselves are deleted directly.",
                 "Every path is checked again right before anything happens. System folders, other people's files, keychains, password managers and iCloud Drive are always off limits, and apps can only be removed by the Uninstaller.",
                 "Items that need administrator rights ask for your password once per run. They go to a separate folder in the Trash and keep their original owner, so emptying it asks for the password again.",
                 "Each file Spruce moves or removes is written to the operations log (Activity › Operations Log), and every run to your activity history.",
@@ -222,7 +222,7 @@ enum HelpContent {
             return [
                 "Full Disk Access lets Spruce see Mail downloads, Safari data, and other folders macOS protects. Without it, those scans skip what they can't read.",
                 "App Management lets Spruce update and uninstall apps that macOS guards. Notifications let alerts and the weekly reminder reach you. Login Items is where macOS lists what Spruce helps you turn off.",
-                "Spruce never sends your data anywhere. The only network requests are update checks when you open Updater or turn update checks on.",
+                "Spruce never sends your data anywhere. The only network requests are app update checks (when you open Updater; with update alerts on, also during Checkup and once a day) and downloading an update you choose to install.",
             ]
         case .shortcuts:
             return []

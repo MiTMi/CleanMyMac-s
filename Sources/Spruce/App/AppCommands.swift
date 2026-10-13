@@ -72,7 +72,8 @@ extension ScanFlowModel {
             scanAgain: canScan ? { [weak self] in self?.startScan() } : nil,
             stop: isBusy ? { [weak self] in self?.cancel() } : nil,
             selectAll: hasResults ? { [weak self] in self?.selectAll(true) } : nil,
-            deselectAll: hasResults ? { [weak self] in self?.selectAll(false) } : nil
+            deselectAll: hasResults ? { [weak self] in self?.selectAll(false) } : nil,
+            selectRecommended: hasResults ? { [weak self] in self?.selectRecommended() } : nil
         )
     }
 }

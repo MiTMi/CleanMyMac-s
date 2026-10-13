@@ -347,6 +347,32 @@ final class CheckupSession {
         selectionChanged = true
     }
 
+    /// Tiles Edit › Select All Items / Deselect All / Select Recommended act on: those
+    /// that can run and aren't being checked again.
+    private var menuSelectableModules: Set<ModuleID> {
+        Set(board.tiles.filter { CheckupBoard.isSelectable($0) && !rescanning.contains($0.module) }.map(\.module))
+    }
+
+    /// Edit › Select All Items / Deselect All: ticks or clears every tile that can run.
+    func setAllTiles(selected: Bool) {
+        guard phase == .results, !isWaitingForApps, quitPrompt == nil else { return }
+        let tiles = menuSelectableModules
+        let next = selected ? selection.union(tiles) : selection.subtracting(tiles)
+        guard next != selection else { return }
+        selection = next
+        selectionChanged = true
+    }
+
+    /// Edit › Select Recommended: back to the tiles Checkup ticks on its own.
+    func selectRecommendedTiles() {
+        guard phase == .results, !isWaitingForApps, quitPrompt == nil else { return }
+        let tiles = menuSelectableModules
+        let next = selection.subtracting(tiles).union(board.defaultSelection.intersection(tiles))
+        guard next != selection else { return }
+        selection = next
+        selectionChanged = true
+    }
+
     /// Writes an edited review back to its contributor and updates the tile.
     func applyReview(_ module: ModuleID, groups: [ScanGroup]) {
         guard let contributor = contributors[module] else { return }

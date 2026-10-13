@@ -258,6 +258,43 @@ final class CleanupScreenModel {
         updateItems(in: section) { $0.isSelected = false }
     }
 
+    /// Edit › Select All Items: everything but risky items (they need their own confirmation).
+    func selectAllItems(in section: CleanupSection? = nil) {
+        updateItems(in: section) { $0.isSelected = $0.safety != .risky }
+    }
+
+    /// The section whose review is on screen, if any.
+    var reviewedSection: CleanupSection? {
+        if case .review(let section) = route { return section }
+        return nil
+    }
+
+    /// Scan and Edit menu actions (published by `CleanupRootScreen`). Run Selected… is
+    /// not offered: the Clean orb runs a safe selection without a confirmation, and the
+    /// menu may only open one.
+    var menuActions: SpruceFlowActions {
+        var actions = SpruceFlowActions()
+        switch flow.phase {
+        case .idle, .done, .failed:
+            actions.scanAgain = { [weak self] in self?.startScan() }
+        case .scanning, .running:
+            actions.stop = { [weak self] in self?.flow.cancel() }
+        case .results:
+            guard !isWaitingForApps, quitPrompt == nil, !confirmNonSafe else { break }
+            actions.scanAgain = { [weak self] in
+                guard let self else { return }
+                self.startScan(sections: self.scannedSections)
+            }
+            if !flow.groups.allItems.isEmpty {
+                let section = reviewedSection
+                actions.selectAll = { [weak self] in self?.selectAllItems(in: section) }
+                actions.deselectAll = { [weak self] in self?.deselectAll(in: section) }
+                actions.selectRecommended = { [weak self] in self?.selectRecommended(in: section) }
+            }
+        }
+        return actions
+    }
+
     /// Card checkbox: clears a section that has a selection, otherwise restores the
     /// recommended selection (never everything — review items stay unchecked).
     func toggleSection(_ section: CleanupSection) {
@@ -417,6 +454,7 @@ struct CleanupRootScreen: View {
         .onChange(of: screen.flow.phase) { oldPhase, newPhase in
             screen.phaseChanged(from: oldPhase, to: newPhase)
         }
+        .focusedSceneValue(\.spruceFlow, screen.menuActions)
         .sheet(item: $screen.quitPrompt) { prompt in
             CleanupQuitAppsSheet(prompt: prompt,
                                  onQuit: { screen.quitAppsAndClean() },
@@ -483,7 +521,8 @@ struct CleanupPhaseContent: View {
         case .done:
             if let outcome = screen.doneOutcome {
                 DoneView(module: .cleanup, outcome: outcome,
-                         doneTitle: screen.flow.groups.isEmpty ? "Done" : "Review Remaining") {
+                         doneTitle: screen.flow.groups.isEmpty ? "Done" : "Review Remaining",
+                         flow: screen.flow) {
                     screen.flow.showRemaining()
                 }
             } else {

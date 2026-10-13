@@ -86,6 +86,26 @@ final class CleanupScannerTests: XCTestCase {
                        ["com.example.app"])
     }
 
+    func testSharedFirefoxFolderIsInUseWhileAnyFirefoxChannelIsOpen() throws {
+        fx.file("Library/Caches/Firefox/Profiles/abcd.default/cache2/entries/0A1B", age: 2 * day)
+        fx.ageFolders(fx.home + "/Library/Caches/Firefox/Profiles/abcd.default/cache2/entries", age: 2 * day)
+
+        let (_, closed) = fx.scan(fx.context(running: ["com.example.other"]), sections: [.systemJunk])
+        let idle = try XCTUnwrap(closed.item(endingWith: "Library/Caches/Firefox"))
+        XCTAssertNil(idle.metadata[CleanupMetadataKey.inUse])
+        XCTAssertEqual(idle.metadata[CleanupMetadataKey.bundleID], "org.mozilla.firefox")
+
+        for channel in ["org.mozilla.firefox", "org.mozilla.firefoxdeveloperedition", "org.mozilla.nightly",
+                        "org.mozilla.firefoxbeta"] {
+            let (scanner, report) = fx.scan(fx.context(running: [channel]), sections: [.systemJunk])
+            let item = try XCTUnwrap(report.item(endingWith: "Library/Caches/Firefox"), channel)
+            XCTAssertFalse(item.isSelected, channel)
+            XCTAssertEqual(item.metadata[CleanupMetadataKey.inUse], "1", channel)
+            XCTAssertNotNil(scanner.blockingReason(for: item), channel)
+            XCTAssertEqual(CleanupOwnership.runningOwners(of: [item], running: [channel, "com.other"]), [channel])
+        }
+    }
+
     func testEarlierRulesClaimTheirFoldersFromGenericCaches() throws {
         fx.file("Library/Caches/Homebrew/downloads/abc--wget.bottle.tar.gz", bytes: 40_000, age: 3 * day)
         let api = fx.file("Library/Caches/Homebrew/api/formula.jws.json", bytes: 20_000, age: 3 * day)

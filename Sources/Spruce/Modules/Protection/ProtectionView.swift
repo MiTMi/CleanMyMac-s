@@ -151,6 +151,53 @@ struct ProtectionToolScreen: View {
                 .transition(.prismPhase(reduceMotion: reduceMotion))
         }
         .animation(Motion.adaptive(Motion.standard, reduceMotion: reduceMotion), value: phaseKey)
+        .focusedSceneValue(\.spruceFlow, menuActions)
+    }
+
+    // MARK: Main menu
+
+    /// Scan and Edit menu actions. Stop is offered while scanning only (removal has no
+    /// Stop button either); Run Selected… is not offered, because the tools' orbs act on
+    /// a safe selection without a confirmation and the menu may only open one.
+    private var menuActions: SpruceFlowActions {
+        var actions = SpruceFlowActions()
+        switch flow.phase {
+        case .idle, .done, .failed:
+            actions.scanAgain = { screen.startScan(tool) }
+        case .scanning:
+            actions.stop = { flow.cancel() }
+        case .running:
+            break
+        case .results:
+            guard screen.browserPrompt == nil, !screen.isQuittingBrowsers else { break }
+            actions.scanAgain = { screen.startScan(tool) }
+            guard !flow.groups.allItems.isEmpty else { break }
+            if tool == .malware {
+                // Items Spruce can't remove itself stay unchecked; risky ones need their own click.
+                actions.selectAll = {
+                    selectItems { ProtectionThreatPresentation.isRemovable($0) && $0.safety != .risky }
+                }
+                actions.selectRecommended = {
+                    selectItems { ProtectionThreatPresentation.isRemovable($0) && $0.safety == .safe }
+                }
+            } else {
+                actions.selectAll = { flow.selectAll(true) }
+                actions.selectRecommended = { flow.selectRecommended() }
+            }
+            actions.deselectAll = { flow.selectAll(false) }
+        }
+        return actions
+    }
+
+    /// Sets every item's selection with one update of the flow's results.
+    private func selectItems(_ include: @escaping (ScanItem) -> Bool) {
+        func apply(_ group: inout ScanGroup) {
+            for i in group.items.indices { group.items[i].isSelected = include(group.items[i]) }
+            for j in group.children.indices { apply(&group.children[j]) }
+        }
+        var groups = flow.groups
+        for i in groups.indices { apply(&groups[i]) }
+        flow.groups = groups
     }
 
     private var phaseKey: String {
@@ -180,7 +227,8 @@ struct ProtectionToolScreen: View {
         case .done:
             if let outcome = flow.outcome {
                 DoneView(module: .protection, outcome: outcome, headline: doneHeadline(outcome),
-                         doneTitle: flow.groups.isEmpty ? "Done" : "Review Remaining") {
+                         doneTitle: flow.groups.isEmpty ? "Done" : "Review Remaining",
+                         flow: flow, putBackConfirmation: putBackConfirmation) {
                     screen.finish(tool)
                 }
             } else {
@@ -199,6 +247,13 @@ struct ProtectionToolScreen: View {
         case .privacy: ProtectionPrivacyResultsScreen(screen: screen, flow: flow)
         case .permissions: ProtectionPermissionsResultsScreen(screen: screen, flow: flow)
         }
+    }
+
+    /// Putting removed threats back asks first.
+    private var putBackConfirmation: String? {
+        guard tool == .malware else { return nil }
+        return "These items were flagged as threats. Put them back only if you're sure they're safe: "
+            + "startup items among them run again at the next login."
     }
 
     private func doneHeadline(_ outcome: RunOutcome) -> String? {

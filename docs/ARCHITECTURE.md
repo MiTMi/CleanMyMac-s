@@ -133,17 +133,25 @@ follows the safety rules below.
 * **Trash accounting and Put Back:** `RunOutcome.trashedBytes` / `trashedCount` (part of
   `freedBytes` that only returns once the Trash is emptied) and `trashRunIDs` (decode as
   zero/empty from older files; `RunOutcome.merged` sums them — engines that build their own
-  outcome from `dispose` results should copy them). `TrashLedger.shared` records where every
-  trashed item went: `restorable(runIDs:)`, `putBack(runIDs:)`, `TrashLedger.openTrash()`.
-  `ScanFlowModel` exposes `canPutBack`, `restorableCount`, `putBack()`, `openTrash()`,
-  `putBackResult` for `DoneView` ("N items (X) are in the Trash. Empty it to get the space
-  back." + Open Trash / Put Back All). `RunOutcome.didAnything` = processed or freed > 0.
+  outcome from `dispose` results copy them: Cleanup, Protection's threat removal and privacy
+  cleaner do). `TrashLedger.shared` records where every trashed item went:
+  `restorable(runIDs:)`, `putBack(runIDs:)`, `TrashLedger.openTrash()`. `DoneView` shows a
+  Trash card for any outcome with trashed items ("N items (X) are in the Trash. Empty the
+  Trash to get the space back." + Open Trash / Put Back All); pass `flow:` when the outcome
+  is a `ScanFlowModel` run so Put Back goes through `ScanFlowModel.putBack()` (`canPutBack`,
+  `restorableCount`, `isPuttingBack`, `putBackResult` stay in the flow), otherwise the card
+  uses `TrashLedger` itself. `putBackConfirmation:` makes it ask first (removed threats).
+  Cleanup's outcome counts moved-to-Trash bytes in `freedBytes` like every module; its
+  `.other` "Emptied the Trash" history record carries no Trash fields.
+  `RunOutcome.didAnything` = processed or freed > 0.
 * **AppleScript:** in-process `NSAppleScript` must run through `AppleScriptExecutor.shared`
   (one serial queue; `run(_:)`, or `queue` + `executeNow(_:)`). `PrivilegedRunner` does.
 * **History:** `HistoryStore.record(_ entries: [ActivityEntry])` records several entries with
   one save; saves are coalesced (~1 s, background, compact JSON) and records made off the
   main thread are applied on the main thread. `ScanFlowModel` records a run only when
-  `didAnything`. `HistoryStore.flush()` runs at quit.
+  `didAnything`, and every finished scan as `.scan` unless it is created with
+  `recordsScanHistory: false` (Protection's malware flow: the engine records `.malwareScan`,
+  which `ActivityHealth.unresolvedThreats` reads). `HistoryStore.flush()` runs at quit.
 * **Alerts:** `Notifier.post(id:title:body:module:tool:kind:)` adds a "Review" action that opens
   `module`/`tool` (routed by the AppDelegate, which reopens a closed main window via
   `AppModel.showMainWindow()`). Sounds follow Settings › Play sounds. Every alert is also
@@ -160,6 +168,11 @@ follows the safety rules below.
   "quick" / "balanced" / "deep" in `SpruceSettings.scanDepth`).
 * **Onboarding** must call `Permissions.requestNotificationAuthorization()` (monitor and
   protection alerts are invisible until authorised).
+* **Cleanup ownership:** a row's `CleanupMetadataKey.owner` may name several apps joined
+  with `CleanupOwnership.ownerSeparator` ("|") — the `Firefox`/`Mozilla` folders belong
+  to every Firefox channel (release, Beta, Developer Edition, Nightly). Use
+  `CleanupOwnership.matches(owner:bundleID:)` / `isRunning` / `owners(in:)` rather than
+  comparing the string.
 * **Toolbox:** Free Up RAM / Flush DNS should call
   `model.performance.runTasks([.freeRAM], progress:)` / `runTasks([.flushDNS], progress:)`
   (never throws; `PerformanceRunSummary.outcome(_:)` converts results to a `RunOutcome`).
@@ -172,8 +185,13 @@ follows the safety rules below.
   Scan (Scan Again ⌘R, Stop ⌘., Run Selected… ⌘↩), Go (⌘1–⌘9, Activity ⇧⌘A) and Help
   (Help window `id: "help"` with `AppModel.showHelp(_:)`, Keyboard Shortcuts ⌘/). Screens
   enable Scan/Edit items by publishing `.focusedSceneValue(\.spruceFlow, SpruceFlowActions(…))`
-  (`ScanFlowModel.menuActions` builds one; `reviewAndRun` must only open the screen's own
-  confirmation) and review lists enable File items with `.focusedSceneValue(\.spruceRows, …)`.
+  (`ScanFlowModel.menuActions` builds one — Scan Again, Stop, Select All / Deselect All /
+  Select Recommended (`ScanFlowModel.selectRecommended()` = safe items only); `reviewAndRun`
+  must only open the screen's own confirmation, so leave it nil where the screen's orb runs
+  without one). `ScanFlowScreen`, `CheckupView` (tiles; Run Selected… asks, then
+  `requestRun()`), Cleanup and Protection's tools publish it. `ReviewSplitView` publishes
+  `.focusedSceneValue(\.spruceRows, …)` for the row under the pointer (or last clicked;
+  `ItemRow(onHover:)`), so File › Quick Look / Reveal / Copy Path / Ignore act on it.
   Never bind ⌘⌫ / ⇧⌘⌫ or any shortcut that deletes without its confirmation.
 * **Files from Finder:** Services ("Uninstall with Spruce", "Map Folder with Spruce", "Shred
   with Spruce"), drops on the Dock icon and Open With call `AppModel.openFiles(_:)`, which
@@ -185,8 +203,9 @@ follows the safety rules below.
 * **Links:** `spruce://open/<module>[?tool=<tool id>]`, `spruce://checkup[?autostart=1]`,
   `spruce://inbox` (navigation only; tool ids must belong to the module). The Dock menu
   offers Run Checkup, Empty Trash…, Free Up Memory… (they open the tool, which confirms)
-  and Open ▸ module. Info.plist keys for links, Services and document types are added by
-  `scripts/build-app.sh`.
+  and Open ▸ module. The Info.plist keys for links (`CFBundleURLTypes`), Services
+  (`NSServices`) and document types (`CFBundleDocumentTypes`) live in `Support/Info.plist`;
+  `scripts/build-app.sh` checks they are there.
 
 ## Safety rules (non-negotiable)
 
@@ -205,7 +224,11 @@ follows the safety rules below.
 7. **Skip data of running apps** where deleting would corrupt state (browser privacy
    cleanup requires the browser to be quit; offer to quit it).
 8. **No telemetry, no network calls** except: update checks (Sparkle appcasts, iTunes
-   lookup API, Homebrew API) when the user opens Updater / enables update checks.
+   lookup API, Homebrew API) when the user opens Updater; while Settings › Notifications ›
+   App updates is on, also when Checkup scans Applications and in a daily background check
+   (`NSBackgroundActivityScheduler`); and downloading a Sparkle update archive
+   (HTTPS, EdDSA-verified) when the user presses Update or runs selected updates from
+   Checkup. Nothing about the Mac or its files is ever sent.
 9. Record every destructive action (FileRemover does this) and every run in history.
 
 ## Coding conventions

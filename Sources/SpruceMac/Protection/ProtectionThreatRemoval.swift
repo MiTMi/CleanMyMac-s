@@ -128,6 +128,7 @@ extension ProtectionEngine {
             }
         }
         var freed: Int64 = 0
+        var trashed = (bytes: Int64(0), count: 0, runIDs: [UUID]())
         var trashedAny = false
         var stillPresent: [(plan: ProtectionRemovalPlan, reason: String)] = []
         if !disposeItems.isEmpty {
@@ -140,6 +141,7 @@ extension ProtectionEngine {
                                       bytesFound: p.bytesFound))
             })
             freed = outcome.freedBytes
+            trashed = (bytes: outcome.trashedBytes, count: outcome.trashedCount, runIDs: outcome.trashRunIDs)
             let done = Set(outcome.removedItemIDs)
             var reasons: [String: String] = [:]
             for failure in outcome.failures where reasons[failure.itemID] == nil {
@@ -231,7 +233,8 @@ extension ProtectionEngine {
             summary += " Restart your Mac to make sure nothing is left running."
         }
         return RunOutcome(module: .protection, freedBytes: freed, processedCount: removed.count, removedItemIDs: removed,
-                          failures: failures, summary: summary)
+                          failures: failures, summary: summary,
+                          trashedBytes: trashed.bytes, trashedCount: trashed.count, trashRunIDs: trashed.runIDs)
     }
 
     // MARK: launchd

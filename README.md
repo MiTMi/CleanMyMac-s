@@ -40,10 +40,13 @@ affiliated with MacPaw.
   privileged script, and never changes file ownership; root-owned items go to a
   separate "Spruce Admin Trash" folder in the Trash.
 * **Undo.** Items moved to the Trash are recorded, so a run can be put back while they
-  are still there; the in-app Notification Center (the bell) keeps alerts you missed.
+  are still there (Put Back All on the completion screen); the in-app Notification
+  Center (the bell) keeps alerts you missed.
 * **Ignore list** for paths, apps and individual items; **operations log** at
   `~/Library/Logs/Spruce/operations.log` (rotated at 5 MB).
-* **No telemetry.** Network access is used only for update checks you start.
+* **No telemetry.** Network access is used only for app update checks (when you open the
+  Updater; while update alerts are on, also in Checkup and once a day in the background)
+  and for downloading an update you choose to install.
 
 ## Install on your Mac
 
