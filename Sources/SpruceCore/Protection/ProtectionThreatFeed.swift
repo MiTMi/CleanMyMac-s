@@ -409,6 +409,7 @@ public enum ProtectionThreatFeedValidator {
                 return Problem("too broad: every name with a wildcard needs at least three other characters.")
             }
         }
+        if let problem = userContentProblem(components.map(String.init), home: pattern.hasPrefix("~/")) { return problem }
         if let canary = canaryPaths.first(where: { ProtectionGlob.matches(pattern, $0) }) {
             return Problem("too broad: it would match \(canary).")
         }
@@ -427,12 +428,14 @@ public enum ProtectionThreatFeedValidator {
         if pattern.range(of: #"\\[1-9]|\\k<"#, options: .regularExpression) != nil {
             return Problem("back-references aren't allowed.")
         }
-        if pattern.range(of: #"\((?:[^()\\]|\\.)*[*+}](?:[^()\\]|\\.)*\)[*+{]"#, options: .regularExpression) != nil {
-            return Problem("a repeated group may not repeat inside (it could take very long to check).")
-        }
-        guard literalComponentCount(regexAfterCaret: pattern.dropFirst()) >= 2 else {
+        if let problem = regexCostProblem(pattern) { return problem }
+        let start = literalStart(regexAfterCaret: pattern.dropFirst())
+        guard start.names.count >= 2 else {
             return Problem("too broad: the expression needs at least two literal names before any pattern (\"~\" doesn't count).")
         }
+        // The literal start, then whatever may follow it (the incomplete name leads it).
+        let components = start.names + (start.partial.map { [$0 + "*"] } ?? [])
+        if let problem = userContentProblem(components, home: pattern.hasPrefix("^~/")) { return problem }
         for canary in canaryPaths {
             let range = NSRange(canary.startIndex..<canary.endIndex, in: canary)
             if regex.firstMatch(in: canary, options: [], range: range) != nil {
@@ -446,9 +449,16 @@ public enum ProtectionThreatFeedValidator {
     /// ("/Library/Application Support/\.[0-9]+" → 2). A name only counts when it ends with a
     /// literal "/" (or the expression ends right after it).
     static func literalComponentCount(regexAfterCaret: Substring) -> Int {
+        literalStart(regexAfterCaret: regexAfterCaret).names.count
+    }
+
+    /// The complete literal path names at the start of a regular expression, and the literal
+    /// start of the name after them when the expression goes on with a pattern
+    /// ("/Library/Application Support/\.x+" → ["Library", "Application Support"], ".").
+    static func literalStart(regexAfterCaret: Substring) -> (names: [String], partial: String?) {
         var scalars = Array(regexAfterCaret.unicodeScalars)
         if scalars.first == "~" { scalars.removeFirst() }
-        guard scalars.first == "/" else { return 0 }
+        guard scalars.first == "/" else { return ([], nil) }
         scalars.removeFirst()
         var literal = ""
         var reachedEnd = true
@@ -475,9 +485,137 @@ public enum ProtectionThreatFeedValidator {
             literal.unicodeScalars.append(scalar)
             index += 1
         }
-        var parts = literal.split(separator: "/", omittingEmptySubsequences: false)
-        if !reachedEnd { parts.removeLast() }          // the last name isn't complete
-        return parts.prefix { !$0.isEmpty }.count
+        var parts = literal.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+        var partial: String?
+        if !reachedEnd { partial = parts.removeLast() }   // the last name isn't complete
+        let names = Array(parts.prefix { !$0.isEmpty })
+        return (names, names.count == parts.count ? partial : nil)
+    }
+
+    /// Refuses expressions a backtracking matcher could take very long to check against a
+    /// path: a repeated group, more than two repeats (`*`, `+`, `?`, `{n,}`, `{n,m}`) or more
+    /// than four `|`. The built-in patterns need far less.
+    static func regexCostProblem(_ pattern: String) -> Problem? {
+        let repeatedGroup = Problem("a group may not be repeated (it could take very long to check).")
+        let scalars = Array(pattern.unicodeScalars)
+        var repeats = 0
+        var bars = 0
+        var inClass = false
+        // What the previous token was: an unescaped "(" or ")".
+        var afterOpen = false
+        var afterGroup = false
+        var index = 0
+        func isDigit(_ scalar: Unicode.Scalar) -> Bool { scalar >= "0" && scalar <= "9" }
+        while index < scalars.count {
+            let scalar = scalars[index]
+            let openedGroup = afterOpen
+            let closedGroup = afterGroup
+            afterOpen = false
+            afterGroup = false
+            if scalar == "\\" {
+                index += 2
+                continue
+            }
+            if inClass {
+                if scalar == "]" { inClass = false }
+                index += 1
+                continue
+            }
+            switch scalar {
+            case "[":
+                inClass = true
+            case "(":
+                afterOpen = true
+            case ")":
+                afterGroup = true
+            case "|":
+                bars += 1
+            case "*", "+":
+                if closedGroup { return repeatedGroup }
+                repeats += 1
+            case "?":
+                // "(?:" and "(?i)" start a group; "x?" and "(…)?" make something optional.
+                if !openedGroup { repeats += 1 }
+            case "{":
+                // {n} repeats a fixed number of times; {n,} and {n,m} vary.
+                var cursor = index + 1
+                var low = ""
+                while cursor < scalars.count, isDigit(scalars[cursor]) {
+                    low.unicodeScalars.append(scalars[cursor])
+                    cursor += 1
+                }
+                guard !low.isEmpty, cursor < scalars.count else { break }
+                var high: String?
+                if scalars[cursor] == "," {
+                    cursor += 1
+                    var digits = ""
+                    while cursor < scalars.count, isDigit(scalars[cursor]) {
+                        digits.unicodeScalars.append(scalars[cursor])
+                        cursor += 1
+                    }
+                    high = digits
+                }
+                guard cursor < scalars.count, scalars[cursor] == "}" else { break }
+                if closedGroup { return repeatedGroup }
+                if let high {
+                    let varies = Int(high).flatMap { top in Int(low).map { top > $0 } } ?? true
+                    if varies { repeats += 1 }
+                }
+                index = cursor
+            default:
+                break
+            }
+            index += 1
+        }
+        if repeats > 2 || bars > 4 {
+            return Problem("it could take very long to check: use at most two repeats (*, +, ?, {n,}) and at most four |.")
+        }
+        return nil
+    }
+
+    /// Places that hold the user's own files, as lowercase names below the home folder; a
+    /// trailing "*" matches the start of a name. A path indicator flags everything inside
+    /// what it matches, so downloaded patterns may not point into these.
+    static let userContentPlaces: [[String]] = [
+        ["documents"], ["desktop"], ["downloads"], ["pictures"], ["movies"], ["music"], ["public"], ["sites"],
+        ["library", "mobile documents"], ["library", "cloudstorage"], ["library", "mail"], ["library", "messages"],
+        ["library", "photos"], ["library", "safari"], ["library", "calendars"], ["library", "keychains"],
+        ["library", "containers", "com.apple.*"], ["library", "group containers", "group.com.apple.*"],
+    ]
+
+    /// Folders outside the home folder that hold people's files (other users' homes, other disks).
+    static let sharedContentPlaces: [[String]] = [["users"], ["volumes"]]
+
+    /// Libraries of the Photos and Music apps, wherever they are.
+    static let mediaLibraryExtensions = [".photoslibrary", ".photolibrary", ".musiclibrary"]
+
+    /// Why a path pattern (its names after "~/" or "/", wildcards allowed) points into the
+    /// user's own files, or nil.
+    static func userContentProblem(_ components: [String], home: Bool) -> Problem? {
+        let names = components.map { $0.lowercased() }
+        if names.contains(where: { name in mediaLibraryExtensions.contains { name.contains($0) } }) {
+            return Problem("it points into your own files.")
+        }
+        for place in home ? userContentPlaces : sharedContentPlaces {
+            // Inside the place, the place itself, or a folder holding it.
+            let compared = zip(names, place)
+            if compared.allSatisfy({ nameMayMatch($0.0, $0.1) }) {
+                return Problem("it points into your own files.")
+            }
+        }
+        return nil
+    }
+
+    /// Whether a pattern's name (which may hold wildcards) may match a place's name (a
+    /// trailing "*" there matches the start of a name). Errs on the side of yes.
+    private static func nameMayMatch(_ name: String, _ place: String) -> Bool {
+        let head = String(name.prefix { $0 != "*" && $0 != "?" })
+        let isPattern = head.count < name.count
+        if place.hasSuffix("*") {
+            let start = String(place.dropLast())
+            return head.hasPrefix(start) || (isPattern && start.hasPrefix(head))
+        }
+        return isPattern ? place.hasPrefix(head) : name == place
     }
 
     static func hasTopLevelAlternation(_ pattern: String) -> Bool {

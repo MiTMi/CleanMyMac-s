@@ -112,6 +112,8 @@ final class YaraEvaluator {
     private var variables: [YaraValue]
     private var currentStrings: [Int] = []
     private var hashCache: [HashKey: YaraValue] = [:]
+    /// Bytes hashed so far (each distinct range counts in full).
+    private var hashedBytes = 0
     private var budget: Int
     private(set) var notes: [String] = []
 
@@ -135,6 +137,16 @@ final class YaraEvaluator {
 
     private func note(_ text: String) {
         if !notes.contains(text) { notes.append(text) }
+    }
+
+    /// Takes `steps` off the budget; false (with a note) once it is used up.
+    private func charge(_ steps: Int) -> Bool {
+        budget -= steps
+        if budget < 0 {
+            note("Some conditions were not finished because the scan reached its work limit.")
+            return false
+        }
+        return true
     }
 
     /// Whether a loaded rule's condition holds (memoised). A rule first reached from inside
@@ -204,10 +216,13 @@ final class YaraEvaluator {
         case .defined(let operand):
             return .boolean(evaluate(operand) != .undefined)
         case .ofStrings(let quantifier, let set, let anchor):
+            // Each string is work, even when checking it calls nothing else.
+            guard charge(set.count) else { return .undefined }
             var count = 0
             for index in set where stringMatch(matches[index], anchor) == .boolean(true) { count += 1 }
             return quantify(quantifier, count, set.count)
         case .ofRules(let quantifier, let rules):
+            guard charge(rules.count) else { return .undefined }
             var count = 0
             for index in rules where ruleMatches(index) { count += 1 }
             return quantify(quantifier, count, rules.count)
@@ -310,7 +325,15 @@ final class YaraEvaluator {
         }
         let key = HashKey(function: function, start: Int(offset), end: Int(end))
         if let cached = hashCache[key] { return cached }
-        budget -= Int(end - offset) >> 6
+        // Every distinct range is hashed in full, so the bytes hashed are capped (a few
+        // whole-file hashes fit easily); a rule hashing range after range stops here.
+        let length = Int(end - offset)
+        hashedBytes += length
+        guard hashedBytes <= max(4 * data.count, 1 << 20) else {
+            note("A rule hashed too much of the file; it was stopped.")
+            return .undefined
+        }
+        guard charge(max(1, length >> 2)) else { return .undefined }
         let value = YaraEvaluator.digest(function, UnsafeRawBufferPointer(rebasing: UnsafeRawBufferPointer(data)[key.start..<key.end]))
         hashCache[key] = value
         return value
@@ -362,6 +385,9 @@ final class YaraEvaluator {
             }
         case .contains, .icontains, .startswith, .istartswith, .endswith, .iendswith, .iequals:
             guard case .text(let a) = lhs, case .text(let b) = rhs else { return .undefined }
+            // `contains` compares at every position.
+            let cost = op == .contains || op == .icontains ? a.count &* max(1, b.count) : a.count &+ b.count
+            guard charge(cost >> 4) else { return .undefined }
             return .boolean(Self.textOperation(op, a, b))
         }
     }
@@ -451,7 +477,9 @@ final class YaraEvaluator {
             return .boolean(needed <= 0 ? count == 0 : Int64(count) >= needed)
         case .percent(let expr):
             guard let percent = evaluate(expr).integer else { return .undefined }
-            return .boolean(percent <= 0 ? count == 0 : Int64(count) * 100 >= percent * Int64(total))
+            if percent <= 0 { return .boolean(count == 0) }
+            // Capped at 100%, so a huge percentage can't overflow.
+            return .boolean(Int64(count) * 100 >= min(percent, 100) * Int64(total))
         }
     }
 

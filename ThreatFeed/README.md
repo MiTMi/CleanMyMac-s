@@ -17,9 +17,11 @@ How the app uses them:
 * A copy that passes the checks below is cached on disk. If a download fails or is refused,
   the app quietly keeps its cached copy, or the catalog built into the app.
 * The list can only **add** detections. Built-in families win when an id is used twice,
-  indicators the built-in catalog already has are skipped, and downloaded indicators and
-  rules are ignored for Apple-signed files. Spruce never removes anything without the user
-  confirming, and removed items go to the Trash.
+  indicators the built-in catalog already has are skipped, downloaded indicators and rules
+  are ignored for Apple-signed files, and downloaded rules don't run on programs with a
+  valid developer signature (Developer ID or App Store). Something only this list flags is
+  shown to the user but never selected for removal on its own. Spruce never removes
+  anything without the user confirming, and removed items go to the Trash.
 
 The code that reads and checks these files is
 `Sources/SpruceCore/Protection/ProtectionThreatFeed.swift` (feed) and
@@ -80,8 +82,10 @@ Indicators may also point at the built-in families, by id: `adload`, `pirrit`, `
 `bundlore`, `shlayer`, `chromeloader`, `amos`, `banshee` and the others listed in
 `ProtectionCatalogData.families`.
 
-How a finding is pre-selected follows its family's category: known threats are pre-selected
-for removal except `pua` and `suspicious`, which wait for the user's decision.
+Findings that only this list (its indicators or rules) detects are never pre-selected for
+removal: the user decides. When the built-in catalog or Apple's XProtect rules also detect
+an item, pre-selection follows its family's category: known threats are pre-selected for
+removal except `pua` and `suspicious`, which wait for the user's decision.
 
 ### Indicators
 
@@ -116,11 +120,19 @@ are strict:
   home folder, like `~/.helper`, can only be built into the app.)
 * Every name with a wildcard needs at least three other characters (`~/Library/LaunchAgents/*`
   is refused).
-* A `pathRegex` starts with `^/` or `^~/`, compiles, uses `|` only inside parentheses, has no
-  back-references and no repeated group that repeats inside (such as `(a+)+`). Its literal
-  start must hold at least two complete names: `^~/Library/Application Support/\.[0-9]{19,}(/|$)`
-  is fine, `^/(private/)?tmp/php` isn't (write two entries, `^/private/tmp/…` and so on,
-  with two names each).
+* A `pathRegex` starts with `^/` or `^~/`, compiles, uses `|` only inside parentheses and
+  has no back-references. So that it is quick to check against every path, it has no
+  repeated group (`(a|b)*`, `(x+)+`, `(ab){2}`), at most two repeats (`*`, `+`, `?`, `{n,}`,
+  `{n,m}`; `{n}` is fine) and at most four `|`. Its literal start must hold at least two
+  complete names: `^~/Library/Application Support/\.[0-9]{19,}(/|$)` is fine,
+  `^/(private/)?tmp/php` isn't (write two entries, `^/private/tmp/…` and so on, with two
+  names each).
+* No pattern may point into the user's own files: `~/Documents`, `~/Desktop`,
+  `~/Downloads`, `~/Pictures`, `~/Movies`, `~/Music`, `~/Public`, `~/Sites`, iCloud Drive
+  and cloud storage (`~/Library/Mobile Documents`, `~/Library/CloudStorage`), Mail,
+  Messages, Photos, Safari, Calendars, Keychains, Apple's app containers
+  (`~/Library/Containers/com.apple.…`, `~/Library/Group Containers/group.com.apple.…`),
+  Photos and Music libraries anywhere, `/Users` and `/Volumes`.
 * No pattern may match one of Spruce's ordinary sample locations: the home folder and its
   standard folders, `~/Library/LaunchAgents/com.example.agent.plist`,
   `/Library/LaunchDaemons/com.example.helper.plist`, `/Applications/Example.app`,
@@ -156,6 +168,8 @@ global rules). Rules that use regular expressions, base64 strings or modules oth
 refer to them; `include` lines are ignored.
 
 Keep rules specific. When the app loads the file it runs the rules over a few harmless
-samples (an empty file, a bare program header, a tiny shell script, a property list, zeros
-and random bytes); any rule that matches one is switched off. Test a new rule against the
+samples (an empty file, bare program headers, the start of a 1 MB program, a tiny shell
+script, a property list, zeros and random bytes); any rule that matches one is switched
+off. The rules don't run on programs with a valid developer signature (Developer ID or App
+Store); scripts and unsigned, ad-hoc or badly signed programs are checked. Test a new rule against the
 malware sample it targets and against ordinary apps before publishing it.

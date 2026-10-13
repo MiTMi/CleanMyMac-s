@@ -72,11 +72,16 @@ actor ProtectionVirusTotalClient {
         return ProtectionVirusTotalKeychain.exists()
     }
 
-    /// Saves a key in the Keychain. A different key starts a fresh lookup count.
-    func setKey(_ newKey: String) throws {
+    /// Saves a key in the Keychain. The lookup count carries over whatever the key, so
+    /// removing a key and adding it again never lifts the limits (a new key at worst waits
+    /// for a day of the old one's lookups to pass). `checkedAt` is when the key was just
+    /// checked with VirusTotal: a check of a key that wasn't saved yet isn't counted when it
+    /// goes, so it is counted here.
+    func setKey(_ newKey: String, checkedAt: Date? = nil) throws {
+        let previous = currentKey()
         try ProtectionVirusTotalKeychain.save(newKey)
-        if currentKey() != newKey {
-            quota = VirusTotalQuota()
+        if previous != newKey, let checkedAt {
+            quota.record(limit, now: checkedAt)
             saveQuota()
         }
         key = newKey
@@ -165,7 +170,7 @@ actor ProtectionVirusTotalClient {
 
             quota.record(limit, now: now)
             saveQuota()
-            let result = await Self.request(sha256: hash, key: key)
+            let (result, delivered) = await Self.send(sha256: hash, key: key)
             switch result {
             case .found, .notFound:
                 quota.recordAnswer()
@@ -184,14 +189,20 @@ actor ProtectionVirusTotalClient {
             case .invalidKey:
                 return .invalidKey
             case .failed(let message):
+                // A request that never left the Mac doesn't use up a lookup.
+                if !delivered, let index = quota.lookups.lastIndex(of: now) {
+                    quota.lookups.remove(at: index)
+                    saveQuota()
+                }
                 return .failed(message)
             }
         }
     }
 
     /// Checks a key with one lookup of the EICAR test file's hash: 200 or 404 means
-    /// VirusTotal accepted the key, 401/403 that it didn't. A key other than the saved one
-    /// has its own limits, so only the saved key waits for a slot.
+    /// VirusTotal accepted the key, 401/403 that it didn't. Only the saved key waits for a
+    /// slot and is counted here, so a new key can always be checked; `setKey(_:checkedAt:)`
+    /// counts the check of a key when it is saved.
     func validate(key candidate: String) async -> VirusTotalKeyCheck {
         guard let candidateKey = VirusTotalAPI.normalizedKey(candidate) else { return .malformed }
         let isSaved = currentKey() == candidateKey
@@ -243,19 +254,34 @@ actor ProtectionVirusTotalClient {
 
     /// One `GET /files/{sha256}`. The only data sent are the hash (in the address) and the key.
     static func request(sha256: String, key: String) async -> VirusTotalLookupResult {
-        guard let url = VirusTotalAPI.fileReportURL(sha256: sha256) else { return .failed("Spruce couldn't fingerprint this file.") }
+        await send(sha256: sha256, key: key).result
+    }
+
+    /// Network errors after which the request certainly never reached VirusTotal.
+    static let notSentErrors: [URLError.Code] = [.notConnectedToInternet, .cannotFindHost, .dnsLookupFailed,
+                                                  .cannotConnectToHost]
+
+    /// Like `request`; `delivered` is false when the request certainly never left the Mac
+    /// (no connection, VirusTotal's address couldn't be found or reached). Timeouts and
+    /// dropped connections count as delivered: VirusTotal may have counted them.
+    static func send(sha256: String, key: String) async -> (result: VirusTotalLookupResult, delivered: Bool) {
+        guard let url = VirusTotalAPI.fileReportURL(sha256: sha256) else {
+            return (.failed("Spruce couldn't fingerprint this file."), false)
+        }
         var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: timeout)
         request.httpMethod = "GET"
         request.setValue(key, forHTTPHeaderField: VirusTotalAPI.keyHeader)
         do {
             let (data, response) = try await session.data(for: request)
-            guard let http = response as? HTTPURLResponse else { return .failed(unreachable) }
+            guard let http = response as? HTTPURLResponse else { return (.failed(unreachable), true) }
             guard data.count <= VirusTotalAPI.maxResponseBytes else {
-                return .failed("VirusTotal sent an answer Spruce couldn't read.")
+                return (.failed("VirusTotal sent an answer Spruce couldn't read."), true)
             }
-            return VirusTotalAPI.parse(statusCode: http.statusCode, body: data, sha256: sha256)
+            return (VirusTotalAPI.parse(statusCode: http.statusCode, body: data, sha256: sha256), true)
+        } catch let error as URLError where notSentErrors.contains(error.code) {
+            return (.failed(unreachable), false)
         } catch {
-            return .failed(unreachable)
+            return (.failed(unreachable), true)
         }
     }
 

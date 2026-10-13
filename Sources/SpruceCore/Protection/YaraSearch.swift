@@ -254,6 +254,8 @@ final class YaraSearch {
     private var full: [Bool]
     private var stepsLeft: Int
     private var segmentSteps: [Int]
+    /// Matches later pieces of split hex strings may still keep in this scan (all together).
+    private var chainPieceSpansLeft: Int
     private(set) var notes: [String] = []
 
     init(program: YaraProgram, data: UnsafeBufferPointer<UInt8>, limits: YaraScanLimits) {
@@ -265,6 +267,7 @@ final class YaraSearch {
         full = Array(repeating: false, count: program.segments.count)
         stepsLeft = max(0, limits.maxTotalSteps)
         segmentSteps = Array(repeating: max(0, limits.maxStepsPerString), count: program.segments.count)
+        chainPieceSpansLeft = 4 * max(limits.maxMatchesPerString, limits.maxMatchesPerChainPiece)
     }
 
     private func note(_ text: String) {
@@ -336,12 +339,19 @@ final class YaraSearch {
             return
         }
         var starts: [Int] = []
-        let cap = limits.maxMatchesPerString
+        let cap = capacity(segment)
         walker.walk(plan.backward, 0, position, -1) { start in
             starts.append(start)
             return starts.count >= cap
         }
         for start in starts { record(segment, YaraSpan(start: start, end: end)) }
+    }
+
+    /// Matches a segment keeps. A later piece of a split hex string keeps many more: only
+    /// its matches after an earlier piece count, and those may come late in the file.
+    private func capacity(_ segment: Int) -> Int {
+        program.isChainTail[segment] ? max(limits.maxMatchesPerString, limits.maxMatchesPerChainPiece)
+            : limits.maxMatchesPerString
     }
 
     private func record(_ segment: Int, _ span: YaraSpan) {
@@ -350,7 +360,13 @@ final class YaraSearch {
         if info.fullword, !isFullword(span, wide: info.wide) { return }
         guard seen[segment].insert(span.start).inserted else { return }
         hits[segment].append(span)
-        if hits[segment].count >= limits.maxMatchesPerString {
+        if program.isChainTail[segment] {
+            chainPieceSpansLeft -= 1
+            if hits[segment].count >= capacity(segment) || chainPieceSpansLeft <= 0 {
+                full[segment] = true
+                note("Part of a string matched too often; some of its matches may be missing.")
+            }
+        } else if hits[segment].count >= limits.maxMatchesPerString {
             full[segment] = true
             note("A string matched more than \(limits.maxMatchesPerString) times; later matches were not counted.")
         }
@@ -424,8 +440,11 @@ final class YaraSearch {
         var out: [YaraSpan] = []
         out.reserveCapacity(min(spans.count, limits.maxMatchesPerString))
         for span in spans where out.last?.start != span.start {
+            if out.count >= limits.maxMatchesPerString {
+                note("A string matched more than \(limits.maxMatchesPerString) times; later matches were not counted.")
+                break
+            }
             out.append(span)
-            if out.count >= limits.maxMatchesPerString { break }
         }
         return out
     }

@@ -34,7 +34,8 @@ import Musl
 // scan, so no rule file or input can hang a scan; results then carry a note.
 //
 // Differences from YARA worth knowing: `#a` stops counting at `maxMatchesPerString`
-// (YARA: 1,000,000); `!a` of a pattern with jumps is its shortest match from that offset;
+// (YARA: 1,000,000; later pieces of split hex strings keep `maxMatchesPerChainPiece`);
+// `!a` of a pattern with jumps is its shortest match from that offset;
 // `0 of …` means none of them; references to rules defined later are allowed;
 // wildcard rule sets may name at most 1,000 rules.
 
@@ -147,16 +148,21 @@ public struct YaraScanLimits: Sendable, Hashable {
     public var linearScanBytes: Int
     /// Longest `for … in (a..b)` loop that runs.
     public var maxLoopIterations: Int
+    /// Matches kept for a later piece of a hex string split at a long jump (`{ … [-] … }`):
+    /// a piece only counts after the earlier ones, so its first matches alone may all come
+    /// too early. A scan keeps at most four times this many such matches in all.
+    public var maxMatchesPerChainPiece: Int
 
     public init(maxMatchesPerString: Int = 1_000, maxStepsPerCandidate: Int = 100_000,
                 maxStepsPerString: Int = 5_000_000, maxTotalSteps: Int = 50_000_000, linearScanBytes: Int = 16 << 20,
-                maxLoopIterations: Int = 1_000_000) {
+                maxLoopIterations: Int = 1_000_000, maxMatchesPerChainPiece: Int = 100_000) {
         self.maxMatchesPerString = maxMatchesPerString
         self.maxStepsPerCandidate = maxStepsPerCandidate
         self.maxStepsPerString = maxStepsPerString
         self.maxTotalSteps = maxTotalSteps
         self.linearScanBytes = linearScanBytes
         self.maxLoopIterations = maxLoopIterations
+        self.maxMatchesPerChainPiece = maxMatchesPerChainPiece
     }
 
     public static let standard = YaraScanLimits()

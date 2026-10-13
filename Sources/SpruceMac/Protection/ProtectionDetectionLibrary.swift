@@ -46,14 +46,20 @@ final class ProtectionDetectionLibrary: @unchecked Sendable {
         return (list.catalog, sources + list.ruleSources)
     }
 
-    /// The cached threat list, read from disk on first use.
+    /// The cached threat list, read from disk on first use. While the list is off only its
+    /// status is read: the cached files aren't parsed or compiled, so turning the list off
+    /// always works around a bad copy.
     func currentThreatList() -> ProtectionThreatListSnapshot {
         lock.lock()
         if let threatList {
             lock.unlock()
             return threatList
         }
+        let enabled = threatListOn
         lock.unlock()
+        guard enabled else {
+            return ProtectionThreatListSnapshot(feed: .empty, rules: nil, status: feedCache.loadStatus())
+        }
         let loaded = feedCache.load()
         lock.lock()
         defer { lock.unlock() }

@@ -3,7 +3,8 @@
 // Spruce downloads this file (at most once a day, over HTTPS) and runs its rules with the
 // built-in YARA engine, next to Apple's XProtect rules, over the programs and scripts a
 // malware scan looks at. A match only ever flags a file for the user to review; nothing is
-// removed without the user confirming, and matches on Apple-signed files are ignored.
+// removed without the user confirming. The rules don't run on Apple-signed files or on
+// programs with a valid developer signature (Developer ID, App Store).
 //
 // Rules here should name what they detect in their meta section:
 //

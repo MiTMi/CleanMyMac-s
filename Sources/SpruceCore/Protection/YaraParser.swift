@@ -4,7 +4,8 @@ import Foundation
 // in: the parser records it and resumes at the next line that starts a rule (or an import).
 
 struct YaraParser {
-    /// Deepest nesting of parentheses, `not` and unary operators accepted in a condition.
+    /// Deepest nesting of parentheses, `not`, unary operators, `at`/`in` and loops accepted
+    /// in a condition.
     static let maxNesting = 32
 
     static let keywords: Set<String> = [
@@ -465,13 +466,18 @@ struct YaraParser {
         return expr
     }
 
+    /// `at`/`in` count as nesting: `$a at $a at …` recurses without parentheses.
     private mutating func parseAnchor(allowAt: Bool) throws -> YaraSyntaxAnchor {
         if allowAt, isKeyword("at") {
             try advance()
+            try enter()
+            defer { nesting -= 1 }
             return .at(try parseBinary(3))
         }
         if isKeyword("in") {
             try advance()
+            try enter()
+            defer { nesting -= 1 }
             let (low, high) = try parseRange()
             return .within(low, high)
         }
@@ -528,6 +534,9 @@ struct YaraParser {
 
     private mutating func parseFor() throws -> YaraSyntaxExpr {
         try advance()
+        // A loop counts as nesting: its quantifier can itself start with `for`.
+        try enter()
+        defer { nesting -= 1 }
         let quantifier: YaraSyntaxQuantifier
         if isKeyword("all") || isKeyword("any") || isKeyword("none") {
             quantifier = isKeyword("all") ? .all : isKeyword("any") ? .any : .none

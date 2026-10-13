@@ -75,8 +75,9 @@ public final class ProtectionEngine: CheckupContributor, GroupScanner, @unchecke
         // whole lifetime, and automatic scans run on the schedule chosen on the Protection hub.
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            self.followRealtimeSetting()
+            // The threat list switch first, so nothing compiles a list the user turned off.
             self.followDetectionSettings()
+            self.followRealtimeSetting()
             self.background.start(engine: self)
             let engine = self
             Task.detached(priority: .utility) { await engine.publishVirusTotalState() }

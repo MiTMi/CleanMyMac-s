@@ -351,6 +351,10 @@ public struct ProtectionThreatFinding: Identifiable, Codable, Sendable, Hashable
     public var ruleHits: [ProtectionRuleHit]
     /// The VirusTotal answer for `sha256`, once looked up.
     public var virusTotal: VirusTotalVerdict?
+    /// True when everything that makes this a known threat came from the downloaded threat
+    /// list (its indicators or rules). Such findings are shown but not pre-selected: a broken
+    /// or tampered list must never queue the user's files for removal on its own.
+    public var isThreatListOnly: Bool
 
     public init(
         id: String,
@@ -374,7 +378,8 @@ public struct ProtectionThreatFinding: Identifiable, Codable, Sendable, Hashable
         manualRemovalNote: String? = nil,
         programPath: String? = nil,
         ruleHits: [ProtectionRuleHit] = [],
-        virusTotal: VirusTotalVerdict? = nil
+        virusTotal: VirusTotalVerdict? = nil,
+        isThreatListOnly: Bool = false
     ) {
         self.id = id
         self.name = name
@@ -398,15 +403,17 @@ public struct ProtectionThreatFinding: Identifiable, Codable, Sendable, Hashable
         self.programPath = programPath
         self.ruleHits = ruleHits
         self.virusTotal = virusTotal
+        self.isThreatListOnly = isThreatListOnly
     }
 
     private enum CodingKeys: String, CodingKey {
         case id, name, family, category, severity, evidence, reasons, kind, path, relatedPaths, launchLabel,
              launchDomain, signing, sha256, score, cronLine, size, inode, manualRemovalNote, programPath, ruleHits,
-             virusTotal
+             virusTotal, isThreatListOnly
     }
 
-    /// Decodes leniently: fields added later (program, rule hits, VirusTotal) may be missing.
+    /// Decodes leniently: fields added later (program, rule hits, VirusTotal, threat list
+    /// origin) may be missing.
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(String.self, forKey: .id)
@@ -431,6 +438,7 @@ public struct ProtectionThreatFinding: Identifiable, Codable, Sendable, Hashable
         programPath = try c.decodeIfPresent(String.self, forKey: .programPath)
         ruleHits = (try? c.decodeIfPresent([ProtectionRuleHit].self, forKey: .ruleHits)) ?? []
         virusTotal = try? c.decodeIfPresent(VirusTotalVerdict.self, forKey: .virusTotal)
+        isThreatListOnly = (try? c.decodeIfPresent(Bool.self, forKey: .isThreatListOnly)) ?? nil ?? false
     }
 
     /// The strongest reason.
@@ -464,9 +472,10 @@ public struct ProtectionThreatFinding: Identifiable, Codable, Sendable, Hashable
     }
 
     /// Pre-selected for removal: known threats other than potentially unwanted apps,
-    /// which Spruce can remove itself. Everything else waits for the user's decision.
+    /// which Spruce can remove itself, found by more than the downloaded threat list alone.
+    /// Everything else waits for the user's decision.
     public var isRecommendedForRemoval: Bool {
-        isKnownThreat && category != .pua && category != .suspicious && manualRemovalNote == nil
+        isKnownThreat && category != .pua && category != .suspicious && manualRemovalNote == nil && !isThreatListOnly
     }
 
     /// Display location ("~/Library/LaunchAgents").

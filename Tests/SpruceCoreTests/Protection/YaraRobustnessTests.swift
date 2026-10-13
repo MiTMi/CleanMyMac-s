@@ -168,6 +168,91 @@ final class YaraRobustnessTests: XCTestCase {
         XCTAssertTrue(reason(hexSet, "h").contains("too deeply"), reason(hexSet, "h"))
     }
 
+    /// `at`, `in` and `for` recurse without parentheses; they count as nesting too, so a
+    /// hostile rule file can't overflow the stack.
+    func testAnchorsAndLoopsCountAsNesting() {
+        let conditions = [
+            "deep_at": String(repeating: "$a at ", count: 20_000) + "0",
+            "deep_of_at": String(repeating: "1 of them at ", count: 20_000) + "0",
+            "deep_count_in": String(repeating: "#a in (", count: 20_000) + "0..1" + String(repeating: ")..1)", count: 20_000),
+            "deep_for": String(repeating: "for ", count: 20_000) + "1 of them : (true)",
+        ]
+        var source = ""
+        for (name, condition) in conditions.sorted(by: { $0.key < $1.key }) {
+            source += "rule \(name) { strings: $a = \"q\" condition: \(condition) }\n"
+            source += "rule ok_\(name) { condition: true }\n"
+        }
+        source += "rule shallow { strings: $a = \"q\" condition: $a at 0 and #a in (0..1) == 1 and for any of them : ($ at 0) }\n"
+        let set = YaraRuleSet(source: source, origin: "test")
+        for name in conditions.keys {
+            XCTAssertTrue(reason(set, name).contains("nested too deeply"), "\(name): \(reason(set, name))")
+        }
+        XCTAssertEqual(Set(set.rules.map(\.name)), Set(conditions.keys.map { "ok_" + $0 } + ["shallow"]))
+        XCTAssertTrue(set.names(YaraFixture.bytes("q")).contains("shallow"))
+    }
+
+    /// A huge percentage is refused when it is written out, and capped at 100% when it is
+    /// worked out while scanning (it used to overflow and crash).
+    func testHugePercentagesNeverOverflow() {
+        let source = #"""
+        rule literal { strings: $a = "a" $b = "b" condition: 9223372036854775807% of ($a, $b) }
+        rule loop_literal { strings: $a = "a" $b = "b" condition: for 9223372036854775807% of them : ($) }
+        rule zero { strings: $a = "a" condition: 0% of them }
+        rule computed { strings: $a = "a" $b = "b" condition: (9223372036854775806 + 1)% of ($a, $b) }
+        rule computed_loop { strings: $a = "a" $b = "b" condition: for (9223372036854775806 + 1)% of them : ($) }
+        rule negative { strings: $a = "a" $b = "b" condition: (0 - 9223372036854775807)% of ($a, $b) }
+        rule fine { strings: $a = "a" $b = "b" condition: 50% of them }
+        """#
+        let set = YaraRuleSet(source: source, origin: "test")
+        for name in ["literal", "loop_literal", "zero"] {
+            XCTAssertTrue(reason(set, name).contains("between 1 and 100"), "\(name): \(reason(set, name))")
+        }
+        XCTAssertEqual(set.rules.map(\.name), ["computed", "computed_loop", "negative", "fine"])
+        XCTAssertEqual(set.names([]), ["negative"], "No string matches: only the negative (none of them) holds")
+        XCTAssertEqual(set.names(YaraFixture.bytes("a")), ["fine"])
+        XCTAssertEqual(set.names(YaraFixture.bytes("ab")), ["computed", "computed_loop", "fine"])
+        // Harmless-sample checks run every rule over empty and other files: no crash.
+        XCTAssertTrue(ProtectionRuleSource.threatList(set).disabledRules.contains("negative"))
+    }
+
+    /// Each distinct hashed range costs its full size, so the bytes one scan hashes are capped.
+    func testHashingIsCapped() {
+        let source = #"""
+        rule slow { condition: for any i in (0..999999) : ( hash.md5(i, filesize) == "0" ) }
+        rule ordinary { strings: $a = "needle" condition: $a and filesize > 1000 }
+        """#
+        let set = YaraRuleSet(source: source, origin: "test")
+        XCTAssertEqual(set.skipped, [])
+        let data = YaraFixture.bytes("needle") + YaraFixture.noise(200 << 10, seed: 3)
+        let start = Date()
+        let result = set.scanDetailed(Data(data))
+        XCTAssertLessThan(Date().timeIntervalSince(start), 20)
+        XCTAssertEqual(result.matches.map(\.name), ["ordinary"], "The other rule still works")
+        XCTAssertTrue(result.notes.contains { $0.contains("hashed too much") }, "\(result.notes)")
+    }
+
+    /// Work inside `of` over big sets and in text comparisons counts against the budget.
+    func testSetsAndTextComparisonsCountAsWork() {
+        let strings = (0..<2_000).map { "$s\($0) = \"marker-\($0)-z\"" }.joined(separator: "\n")
+        let big = String(repeating: "a", count: 4_000)
+        let sources = [
+            "rule sets { strings: \(strings) condition: for all i in (0..999999) : ( none of them ) }",
+            "rule texts { condition: for all i in (0..999999) : ( \"\(big)\" contains \"\(big.dropLast())b\" or true ) }",
+        ]
+        for source in sources {
+            let set = YaraRuleSet(source: source, origin: "test")
+            XCTAssertEqual(set.skipped, [])
+            let start = Date()
+            let result = set.scanDetailed(Data(YaraFixture.bytes("nothing to see")), limits: YaraScanLimits(maxTotalSteps: 5_000_000))
+            XCTAssertLessThan(Date().timeIntervalSince(start), 20)
+            XCTAssertEqual(result.matches, [])
+            XCTAssertTrue(result.notes.contains { $0.contains("work limit") }, "\(result.notes)")
+        }
+        let long = YaraRuleSet(source: "rule huge_text { condition: \"\(String(repeating: "x", count: 5_000))\" contains \"x\" }",
+                               origin: "test")
+        XCTAssertTrue(reason(long, "huge_text").contains("longer than 4096"), reason(long, "huge_text"))
+    }
+
     func testGarbageNeverCrashes() {
         let noise = YaraFixture.noise(20_000, seed: 7)
         let inputs = [

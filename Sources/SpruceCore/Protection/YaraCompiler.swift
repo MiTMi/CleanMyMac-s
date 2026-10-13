@@ -30,6 +30,9 @@ struct YaraProgram: Sendable {
     var order: [Int] = []
     var strings: [YaraProgramString] = []
     var segments: [YaraSegment] = []
+    /// Per segment: true when it is a later piece of a split hex string (`{ … [-] … }`)
+    /// somewhere, so it keeps more matches (`YaraScanLimits.maxMatchesPerChainPiece`).
+    var isChainTail: [Bool] = []
     var plans: [YaraMatchPlan] = []
     var automaton = YaraAtomAutomaton()
     /// Per atom: the plan that verifies it, its length and its segment.
@@ -53,6 +56,8 @@ enum YaraCompiler {
     static let maxDependencies = 500_000
     /// Most rules one wildcard set (`any of (Prefix*)`) may name.
     static let maxWildcardRules = 1_000
+    /// Longest text value in a condition (real rules compare hashes and short names).
+    static let maxConditionText = 4_096
 
     static let modules: Set<String> = [
         "pe", "elf", "macho", "math", "dotnet", "cuckoo", "magic", "time", "console", "string", "dex", "lnk",
@@ -233,8 +238,10 @@ enum YaraCompiler {
                         let id = program.segments.count
                         segmentIDs[segment] = id
                         program.segments.append(segment)
+                        program.isChainTail.append(false)
                         return id
                     }
+                    for id in ids.dropFirst() { program.isChainTail[id] = true }
                     chains.append(YaraProgramChain(segments: ids, gaps: chain.gaps))
                 }
             }
@@ -367,7 +374,11 @@ enum YaraCompiler {
         case .boolean(let value): return .constant(.boolean(value))
         case .integer(let value): return .constant(.integer(value))
         case .float(let value): return .constant(.float(value))
-        case .text(let bytes): return .constant(.text(bytes))
+        case .text(let bytes):
+            guard bytes.count <= maxConditionText else {
+                throw YaraCompileIssue(reason: "A text in the condition is longer than \(maxConditionText) bytes")
+            }
+            return .constant(.text(bytes))
         case .filesize: return .filesize
         case .entrypoint:
             throw YaraCompileIssue(reason: "Uses entrypoint, which Spruce doesn't support")
@@ -483,7 +494,12 @@ enum YaraCompiler {
         case .any: return .any
         case .none: return .none
         case .count(let expr): return .atLeast(try resolve(expr, &scope))
-        case .percent(let expr): return .percent(try resolve(expr, &scope))
+        case .percent(let expr):
+            // As in YARA; a percentage worked out while scanning is capped at 100.
+            if case .integer(let value) = expr, !(1...100).contains(value) {
+                throw YaraCompileIssue(reason: "A percentage must be between 1 and 100")
+            }
+            return .percent(try resolve(expr, &scope))
         }
     }
 

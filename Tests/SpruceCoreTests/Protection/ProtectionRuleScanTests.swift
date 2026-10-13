@@ -211,8 +211,11 @@ final class ProtectionRuleScanTests: XCTestCase {
         let exe = program("/Applications/Player.app/Contents/MacOS/main", "spruce-test-custom-marker")
         let appleBundle = fx.app("/Applications/Apple Thing.app", bundleID: "com.apple.thing")
         program("/Applications/Apple Thing.app/Contents/MacOS/main", "spruce-test-custom-marker")
-        let probe = ProtectionStaticProbe(signatures: [appleBundle: ProtectionSigningInfo(status: .apple)],
-                                          defaultSigning: ProtectionSigningInfo(status: .signed, teamID: "ABCDE12345"))
+        let signedBundle = fx.app("/Applications/Signed Thing.app", bundleID: "com.example.signed")
+        program("/Applications/Signed Thing.app/Contents/MacOS/main", "spruce-test-custom-marker")
+        let probe = ProtectionStaticProbe(signatures: [appleBundle: ProtectionSigningInfo(status: .apple),
+                                                       signedBundle: ProtectionSigningInfo(status: .signed, teamID: "ABCDE12345")],
+                                          defaultSigning: ProtectionSigningInfo(status: .adHoc))
         let report = try scanner(probe).scan(depth: .balanced)
 
         let finding = try XCTUnwrap(report.findings.first { $0.path == bundle })
@@ -223,11 +226,80 @@ final class ProtectionRuleScanTests: XCTestCase {
         XCTAssertEqual(finding.reason, "Matches the Spruce threat list rule for Example.Stealer.A")
         XCTAssertEqual(finding.programPath, exe)
         XCTAssertNil(report.findings.first { $0.path == appleBundle })
+        XCTAssertNil(report.findings.first { $0.path == signedBundle },
+                     "The threat list's rules don't run on apps with a valid developer signature")
 
         // Real-time protection checks new apps the same way.
         XCTAssertEqual(scanner(probe).evaluateApplication(at: bundle)?.family, "Example.Stealer.A")
         XCTAssertNil(scanner(probe, sources: []).evaluateApplication(at: bundle))
         XCTAssertNil(scanner(probe).evaluateApplication(at: appleBundle))
+        XCTAssertNil(scanner(probe).evaluateApplication(at: signedBundle))
+    }
+
+    func testThreatListRulesSkipTrustedCodeButAppleRulesDont() throws {
+        let tool = program("/Users/Shared/signed-tool", "spruce-test-custom-marker spruce-test-generic-marker")
+        let entry = FileWalker.entry(at: tool)
+        let developer = ProtectionSigningInfo(status: .signed, teamID: "ABCDE12345")
+        let rules = scanner().ruleVerdicts(forFile: tool, entry: entry, signing: developer)
+        XCTAssertEqual(rules.map(\.hit.rule), ["XProtect_MACOS_644e18d"], "Apple's rules still run on signed code")
+        XCTAssertEqual(scanner(sources: [feedSource]).ruleVerdicts(forFile: tool, entry: entry, signing: developer), [])
+        for status in [ProtectionSigningInfo.Status.unsigned, .adHoc, .invalid, .unknown] {
+            let found = scanner().ruleVerdicts(forFile: tool, entry: entry, signing: ProtectionSigningInfo(status: status))
+            XCTAssertEqual(Set(found.map(\.hit.rule)), ["XProtect_MACOS_644e18d", "Spruce_Custom"], "\(status)")
+        }
+        XCTAssertEqual(scanner().ruleVerdicts(forFile: tool, entry: entry, signing: nil).count, 2, "Scripts and unknown files")
+    }
+
+    func testFindingsOnlyTheThreatListDetectsAreNotPreSelected() throws {
+        let listOnly = program("~/Library/Application Support/Helper/list-only", "spruce-test-custom-marker")
+        let both = program("~/Library/Application Support/Helper/both", "spruce-test-custom-marker spruce-test-generic-marker")
+        let report = try scanner().scan(depth: .balanced)
+
+        let flagged = try XCTUnwrap(report.findings.first { $0.path == listOnly })
+        XCTAssertEqual(flagged.evidence, .ruleMatch)
+        XCTAssertTrue(flagged.isKnownThreat)
+        XCTAssertTrue(flagged.isThreatListOnly)
+        XCTAssertFalse(flagged.isRecommendedForRemoval, "Shown, but the user decides")
+        XCTAssertFalse(flagged.scanItem.isSelected)
+        XCTAssertEqual(flagged.scanItem.safety, .review)
+
+        let confirmed = try XCTUnwrap(report.findings.first { $0.path == both })
+        XCTAssertFalse(confirmed.isThreatListOnly, "Apple's rules detect it too")
+        XCTAssertTrue(confirmed.isRecommendedForRemoval)
+
+        // Merging keeps the finding pre-selected as soon as one side has other evidence.
+        var state = ProtectionScanState(threshold: 50, progress: nil, isCancelled: { false })
+        var fromList = ProtectionThreatFinding(id: "/y", name: "y", family: "Adload", category: .adware, severity: .high,
+                                               evidence: .knownIndicator, reasons: ["Location used by Adload"],
+                                               kind: .executable, path: "/y", isThreatListOnly: true)
+        state.add(fromList)
+        XCTAssertEqual(state.findings["/y"]?.isRecommendedForRemoval, false)
+        state.add(ProtectionThreatFinding(id: "/y", name: "y", category: .suspicious, severity: .medium, evidence: .heuristic,
+                                          reasons: ["Hidden"], kind: .executable, path: "/y", score: 60))
+        XCTAssertEqual(state.findings["/y"]?.isThreatListOnly, true, "Heuristics alone don't confirm it")
+        state.add(ProtectionThreatFinding(id: "/y", name: "y", family: "XProtect: MACOS.R", category: .malware, severity: .high,
+                                          evidence: .ruleMatch, reasons: ["Matches R"], kind: .executable, path: "/y"))
+        XCTAssertEqual(state.findings["/y"]?.evidence, .knownIndicator)
+        XCTAssertEqual(state.findings["/y"]?.isThreatListOnly, false)
+        XCTAssertEqual(state.findings["/y"]?.isRecommendedForRemoval, true)
+
+        // Older saved reports decode as before.
+        fromList.isThreatListOnly = false
+        var json = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(fromList)) as? [String: Any])
+        json.removeValue(forKey: "isThreatListOnly")
+        let decoded = try JSONDecoder().decode(ProtectionThreatFinding.self, from: JSONSerialization.data(withJSONObject: json))
+        XCTAssertFalse(decoded.isThreatListOnly)
+        XCTAssertTrue(decoded.isRecommendedForRemoval)
+    }
+
+    func testRulesThatMatchAnyBigProgramAreSwitchedOff() {
+        let rules = YaraRuleSet(source: """
+        rule Any_Big_Program { condition: uint32(0) == 0xfeedfacf and filesize > 5000 }
+        rule Specific { strings: $a = "spruce-test-custom-marker" condition: uint32(0) == 0xfeedfacf and $a }
+        """, origin: ProtectionRuleSource.threatListName)
+        let source = ProtectionRuleSource.threatList(rules)
+        XCTAssertEqual(source.disabledRules, ["Any_Big_Program"])
+        XCTAssertEqual(source.activeRuleCount, 1)
     }
 
     func testRuleMatchesMergeWithCatalogAndHeuristicFindings() throws {

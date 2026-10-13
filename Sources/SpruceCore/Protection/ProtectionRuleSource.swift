@@ -43,6 +43,8 @@ public struct ProtectionRuleSource: Sendable {
             for sample in ProtectionHarmlessSamples.all {
                 for match in rules.scan(sample) { disabled.insert(match.name) }
             }
+            let large = ProtectionHarmlessSamples.largeProgram
+            for match in rules.scan(large.data, fileSize: large.fileSize) { disabled.insert(match.name) }
         }
         disabledRules = disabled
     }
@@ -255,6 +257,14 @@ public enum ProtectionRuleClassifier {
 
 /// Ordinary files no sensible malware rule matches (see `ProtectionRuleSource.disabledRules`).
 enum ProtectionHarmlessSamples {
+    /// The start of a bigger program (a 64-bit header, then zeros: 256 KB read of a 1 MB
+    /// file), so a rule that only looks at the header and the size is switched off too.
+    static let largeProgram: (data: Data, fileSize: Int) = (
+        Data([0xCF, 0xFA, 0xED, 0xFE, 0x07, 0x00, 0x00, 0x01, 0x03, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00]
+            + [UInt8](repeating: 0, count: (256 << 10) - 16)),
+        1 << 20
+    )
+
     static let all: [Data] = {
         var samples: [Data] = []
         samples.append(Data())

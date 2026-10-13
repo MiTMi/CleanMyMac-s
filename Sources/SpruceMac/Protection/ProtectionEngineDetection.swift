@@ -23,6 +23,7 @@ extension ProtectionEngine {
     /// saved. Cheap after the first call; call it when Protection or Settings appear.
     public func refreshDetectionStatus() async {
         let library = self.library
+        library.isThreatListEnabled = await ProtectionMac.settings().threatFeedEnabled
         let fallbackVersion = lastAppleStatus?.xprotectVersion
         let (apple, list) = await Task.detached(priority: .utility) { () -> (ProtectionAppleRulesStatus, ProtectionThreatListSnapshot) in
             var status = library.appleRules.load().status
@@ -115,6 +116,7 @@ extension ProtectionEngine {
     public func saveVirusTotalKey(_ key: String, validate: Bool = true) async -> VirusTotalKeyCheck {
         guard let normalized = VirusTotalAPI.normalizedKey(key) else { return .malformed }
         let check: VirusTotalKeyCheck
+        let checkedAt = Date()
         if validate {
             check = await virusTotal.validate(key: normalized)
         } else {
@@ -122,7 +124,8 @@ extension ProtectionEngine {
         }
         guard check.isUsable else { return check }
         do {
-            try await virusTotal.setKey(normalized)
+            // The check just sent counts against the limits like any lookup.
+            try await virusTotal.setKey(normalized, checkedAt: validate ? checkedAt : nil)
         } catch {
             return .failed((error as? ProtectionVirusTotalKeychain.Failure)?.description
                 ?? "Spruce couldn't save the key in your keychain.")
@@ -224,6 +227,8 @@ extension ProtectionEngine {
                 if case .noKey = outcome { break }
                 if case .invalidKey = outcome { break }
                 if case .dailyLimitReached = outcome { break }
+                // Offline, or VirusTotal sent something unreadable: the next scan tries again.
+                if case .failed = outcome { break }
             }
             let waiting = Array(ids.dropFirst(done))
             if !waiting.isEmpty {
@@ -246,6 +251,12 @@ extension ProtectionEngine {
     /// Puts answers Spruce already has (fresh ones, by file hash) on a new report, so a
     /// rescan shows them at once without asking VirusTotal again.
     func withRememberedVirusTotalAnswers(_ report: ProtectionMalwareReport) async -> ProtectionMalwareReport {
+        // This scan rebuilds the rows: an answer kept by row id may be about a file that has
+        // changed since. Answers come back below by file hash, or from a new lookup.
+        let ids = report.findings.map(\.id)
+        await MainActor.run { [detection] in
+            for id in ids { detection.virusTotalByItemID[id] = nil }
+        }
         let hashes = Set(report.findings.compactMap { $0.sha256.flatMap(VirusTotalAPI.normalizedSHA256) })
         guard !hashes.isEmpty else { return report }
         let answers = await virusTotal.cachedVerdicts(for: Array(hashes))

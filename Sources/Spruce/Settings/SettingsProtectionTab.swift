@@ -163,7 +163,7 @@ struct SettingsProtectionTab: View {
                 SettingsNote(text: threatListCheck.message, symbol: style.symbol, color: style.color)
                     .padding(.leading, 30)
             } else if enabled, let problem = detection.threatList.lastError {
-                SettingsNote(text: "The last check didn't work: \(problem) Spruce keeps using the list it has.")
+                SettingsNote(text: "The last check didn't work: \(problem)")
                     .padding(.leading, 30)
             }
             appleRulesRow

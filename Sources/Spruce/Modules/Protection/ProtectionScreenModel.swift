@@ -363,14 +363,17 @@ final class ProtectionScreenModel {
     var detection: ProtectionDetectionState { engine.detection }
 
     /// Puts VirusTotal answers that arrived since the scan on the review rows (the engine
-    /// updates its own results; the flow's list is a copy). An answer only goes on a row
+    /// updates its own results; the flow's list is a copy): the row's own answer, or one for
+    /// its file hash (rows sharing a file are looked up once). An answer only goes on a row
     /// whose file it is about, and selection never changes.
     func applyVirusTotalAnswers() {
         let known = detection.virusTotalByItemID
-        guard !known.isEmpty, !malware.groups.isEmpty else { return }
+        let byHash = detection.virusTotalBySHA256
+        guard !(known.isEmpty && byHash.isEmpty), !malware.groups.isEmpty else { return }
         var answers: [String: VirusTotalVerdict] = [:]
         for item in malware.groups.allItems {
-            guard let verdict = known[item.id], ProtectionThreatPresentation.isAbout(verdict, item) else { continue }
+            guard let verdict = known[item.id] ?? item.protectionSHA256.flatMap({ byHash[$0] }),
+                  ProtectionThreatPresentation.isAbout(verdict, item) else { continue }
             answers[item.id] = verdict
         }
         var groups = malware.groups

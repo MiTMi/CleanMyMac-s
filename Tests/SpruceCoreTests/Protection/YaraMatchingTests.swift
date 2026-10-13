@@ -126,6 +126,12 @@ final class YaraMatchingTests: XCTestCase {
         XCTAssertFalse(yaraHolds("$a", strings: "$a = { 41 42 43 [300-400] 44 45 46 }", data))
         // Every start before the second part is its own match.
         XCTAssertTrue(yaraHolds("#a == 3", strings: "$a = { 41 [-] 42 }", YaraFixture.bytes("AxAxAxB")))
+        // The later piece may match many times before the first one; only its matches after
+        // the first piece count, and they are still found.
+        let many = Array(repeating: YaraFixture.bytes("EF"), count: 1_100).flatMap { $0 } + YaraFixture.bytes("ABCDxEF")
+        XCTAssertTrue(yaraHolds("$a and @a[1] == 2200", strings: "$a = { 41 42 43 44 [-] 45 46 }", many))
+        XCTAssertFalse(yaraHolds("$a", strings: "$a = { 41 42 43 44 [-] 45 46 }",
+                                 Array(repeating: YaraFixture.bytes("EF"), count: 1_100).flatMap { $0 } + YaraFixture.bytes("ABCD")))
     }
 
     // MARK: Text strings and modifiers
@@ -214,6 +220,8 @@ final class YaraMatchingTests: XCTestCase {
         XCTAssertTrue(yaraHolds("$a at 4 and not $a at 5 and $a at 2 + 2", strings: strings, data))
         XCTAssertTrue(yaraHolds("$a in (1..4) and not $a in (1..3) and $b in (10..20)", strings: strings, data))
         XCTAssertTrue(yaraHolds("#b == 1 and #missing_safe == 0", strings: strings + "\n$missing_safe = \"zz\"", data))
+        // Overlapping matches of a longer string each count.
+        XCTAssertTrue(yaraHolds("#a == 3 and @a[2] == 1 and @a[3] == 2", strings: "$a = \"aa\"", YaraFixture.bytes("aaaa")))
     }
 
     func testForLoops() {
@@ -281,6 +289,11 @@ final class YaraMatchingTests: XCTestCase {
         XCTAssertFalse(yaraHolds("uint32(100) == 1 and true", data))
         XCTAssertTrue(yaraHolds("not (uint32(100) == 1 and true)", data), "and turns undefined into false")
         XCTAssertTrue(yaraHolds("defined uint8(0) and not defined uint32(0)", data))
+        // `not` binds tighter than `and` and `or`.
+        XCTAssertFalse(yaraHolds("not true and false", data), "(not true) and false")
+        XCTAssertTrue(yaraHolds("not false and true", data))
+        XCTAssertTrue(yaraHolds("not true or true", data), "(not true) or true")
+        XCTAssertTrue(yaraHolds("not defined uint32(100) and true", data))
     }
 
     // MARK: Rules

@@ -174,6 +174,65 @@ final class ProtectionThreatFeedTests: XCTestCase {
         XCTAssertEqual(ProtectionThreatFeedValidator.literalComponentCount(regexAfterCaret: #"/a\d/b/c"#), 0)
     }
 
+    func testRegularExpressionsMustBeQuickToCheck() {
+        let support = "^~/Library/Application Support/"
+        let refused = [
+            support + "(.|.)*!$", support + ".*.*.*!$", support + String(repeating: "(.|.)", count: 8) + "!$",
+            support + String(repeating: ".{0,30}", count: 3) + "!$", support + "x(ab){2}", support + "x(ab)+",
+            support + "x(a|b)*", support + "x.*?.*!$", support + "x[a-z]+[0-9]+\\.?app",
+            "^/Library/Application Support/" + String(repeating: ".*", count: 20) + "!$",
+        ]
+        for pattern in refused {
+            let result = verdict("pathRegex", pattern)
+            XCTAssertFalse(result.accepted, pattern)
+            XCTAssertTrue(result.reason?.contains("very long to check") == true, "\(pattern): \(result.reason ?? "")")
+        }
+        // Patterns in the style of the built-in ones stay fine.
+        let accepted = [
+            #"^/private/tmp/\.[^/]{9,}/(player|install)\.app(/|$)"#, #"^/private/tmp/(x/)?\.[^/]{9,}/(player|install)\.app(/|$)"#,
+            #"^~/Library/Application Support/\.[0-9]{21,}(/|$)"#, #"^~/Library/Evil/\.local-[0-9A-F]{8}-[0-9A-F]{12}(/|$)"#,
+            #"^~/Library/Application Support/\.exst[0-9]{2,4}[a-z*+?|]{3}(/|$)"#, #"^~/Library/Evil/(a|b|c|d|e)$"#,
+        ]
+        for pattern in accepted {
+            XCTAssertTrue(verdict("pathRegex", pattern).accepted, "\(pattern): \(verdict("pathRegex", pattern).reason ?? "")")
+        }
+        XCTAssertNil(ProtectionThreatFeedValidator.regexCostProblem(#"^/x/y/\(a\)+b{3}"#), "Escaped parentheses aren't groups")
+        XCTAssertNotNil(ProtectionThreatFeedValidator.regexCostProblem("^/x/y/(a|b|c|d|e|f)"))
+    }
+
+    func testPatternsMayNotPointIntoTheUsersFiles() {
+        let paths = [
+            "~/Pictures/Photos Library.photoslibrary", "~/Documents/Taxes", "~/Desktop/Projects", "~/Documents/Work/*.docx",
+            "~/Downloads/Invoice.pdf", "~/Music/Music/Media.localized", "~/Library/Mobile Documents/com~apple~CloudDocs/x",
+            "~/Library/CloudStorage/Dropbox/x", "~/Library/Mail/V10", "~/Library/Messages/chat.db", "~/library/safari/Bookmarks.plist",
+            "~/Library/Containers/com.apple.Notes/Data", "~/Library/Containers/com.apple.*/Data",
+            "~/Library/Group Containers/group.com.apple.notes/NoteStore.sqlite", "/Users/Shared/Projects",
+            "/Users/someone/Documents/x", "/Volumes/Backup/Projects", "/Library/Application Support/Old.photoslibrary",
+            "~/Library/Keychains/login.keychain-db",
+        ]
+        for pattern in paths {
+            let result = verdict("path", pattern)
+            XCTAssertFalse(result.accepted, pattern)
+            XCTAssertTrue(result.reason?.contains("your own files") == true, "\(pattern): \(result.reason ?? "")")
+        }
+        let regexes = [
+            "^~/Documents/Work/.*", #"^~/Library/Containers/com\.apple\.photos(/|$)"#, "^~/Library/Containers/[a-z]+evil",
+            #"^~/Library/Messages/Attachments/.*\.heic$"#, #"^/Users/Shared/evil[0-9]{3}$"#,
+            #"^/Library/Evil/x\.photoslibrary$"#,
+        ]
+        for pattern in regexes {
+            let result = verdict("pathRegex", pattern)
+            XCTAssertFalse(result.accepted, pattern)
+            XCTAssertTrue(result.reason?.contains("your own files") == true, "\(pattern): \(result.reason ?? "")")
+        }
+        // Malware locations next to them stay fine.
+        for pattern in ["~/Library/Containers/com.evilcorp.agent", "~/Library/Application Support/Documents Helper",
+                        "/Library/Application Support/EvilPhotos/run", "~/Library/Group Containers/ZZZZZ99999.evil/x"] {
+            XCTAssertTrue(verdict("path", pattern).accepted, "\(pattern): \(verdict("path", pattern).reason ?? "")")
+        }
+        XCTAssertTrue(verdict("pathRegex", #"^~/Library/Containers/com\.evilcorp\.[a-z]{4}(/|$)"#).accepted)
+    }
+
     func testHashesTeamsAndNamesAreChecked() {
         XCTAssertFalse(verdict("sha256", "abc").accepted)
         XCTAssertFalse(verdict("sha256", String(repeating: "g", count: 64)).accepted)

@@ -221,7 +221,8 @@ follows the safety rules below.
     Spruce's own YARA engine (`YaraRuleSet` in `SpruceCore/Protection/Yara*.swift`, no
     third-party code). Rules using syntax the engine doesn't support (regex and base64 strings,
     the pe/macho/math modules, `entrypoint`…) are skipped one by one with a reason, together
-    with the rules that refer to them; matching is capped so a rule can't hang a scan.
+    with the rules that refer to them; matching, hashing and condition work are capped so a
+    rule can't hang a scan, and nesting is capped so a rule can't overflow the stack.
     `ProtectionAppleRulesLoader` compiles the file once per size + date + inode; rules that
     match harmless sample files are switched off (`ProtectionRuleSource`). Matches on
     Apple-signed files are ignored. Status: `detection.appleRules` (`ProtectionAppleRulesStatus`:
@@ -232,14 +233,19 @@ follows the safety rules below.
     ≤ 5 MB / 2 MB, ETag requests) into `~/Library/Application Support/Spruce/ThreatFeed/`
     (`ProtectionThreatFeedCache`, atomic writes, damaged copies ignored, never an older
     version). It can only add detections: built-in families and indicators win, downloaded
-    indicators never flag Apple-signed files. Checked at most once a day before a scan (the
+    indicators never flag Apple-signed files, downloaded rules don't run on code with a valid
+    developer identity, patterns pointing into the user's own files (Documents, Photos,
+    iCloud Drive…) are refused, and findings only the list detects
+    (`ProtectionThreatFinding.isThreatListOnly`) are never pre-selected. While the list is
+    off its cached files aren't even parsed. Checked at most once a day before a scan (the
     scan waits ≤ 2.5 s, then goes on with the cached copy) and by
     `ProtectionEngine.checkThreatListNow()`; a failed check keeps the cached or built-in data.
     `SpruceSettings.threatFeedEnabled` (default on) turns downloads and the cached copy off.
   * **VirusTotal** — the user's own API key lives only in the Keychain (generic password,
     service `app.spruce.virustotal`, account `api-key`; never in settings, defaults, logs or
     the repo). `ProtectionVirusTotalClient` sends `GET /api/v3/files/{sha256}` only, enforces
-    the public limits (4 a minute, 500 a day, counted in user defaults; a 429 pauses lookups)
+    the public limits (4 a minute, 500 a day, counted in user defaults whichever key is saved,
+    key checks included; a 429 pauses lookups)
     and remembers answers per hash for a week (a day for unknown files). After a scan, while
     `SpruceSettings.virusTotalAutoCheck` is on (default) and a key is saved, up to 40
     heuristic and rule-based findings with a program file are looked up in the background;
