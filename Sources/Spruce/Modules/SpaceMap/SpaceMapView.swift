@@ -21,6 +21,7 @@ struct SpaceMapRootScreen: View {
     @Environment(AppModel.self) private var model
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var screen: SpaceMapScreenModel
+    @State private var isDropTargeted = false
 
     init(engine: SpaceMapEngine) {
         _screen = State(initialValue: SpaceMapScreenModel.shared(for: engine))
@@ -31,9 +32,21 @@ struct SpaceMapRootScreen: View {
             content
                 .id(routeKey)
                 .transition(.prismPhase(reduceMotion: reduceMotion))
+            if isDropTargeted {
+                SpaceMapDropOverlay()
+                    .transition(.opacity)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .animation(Motion.adaptive(Motion.standard, reduceMotion: reduceMotion), value: routeKey)
+        .animation(Motion.quick, value: isDropTargeted)
+        // A folder dropped anywhere on the module (the location cards included) is mapped;
+        // a file maps the folder it is in. Mapping never removes anything.
+        .dropDestination(for: URL.self) { urls, _ in
+            screen.receiveDrop(urls)
+        } isTargeted: { targeted in
+            isDropTargeted = targeted && screen.acceptsDrops
+        }
         .onAppear {
             screen.refreshTargets()
             consumePendingTool()
@@ -105,11 +118,38 @@ struct SpaceMapRootScreen: View {
     /// A folder from Finder ("Map Folder with Spruce", the Dock icon, Open With) becomes the
     /// root of the map (a file maps its enclosing folder). Mapping never removes anything.
     private func consumePendingFiles() {
-        guard model.selection == .spaceMap, let first = model.pendingFiles.first else { return }
-        model.pendingFiles = []
-        var isDirectory: ObjCBool = false
-        let exists = FileManager.default.fileExists(atPath: first.path, isDirectory: &isDirectory)
-        guard exists else { return }
-        screen.mapFolder(isDirectory.boolValue ? first : first.deletingLastPathComponent())
+        guard let first = model.takePendingFiles(for: .spaceMap).first else { return }
+        screen.mapFolder(first)
+    }
+}
+
+/// Shown while a folder is dragged over Space Map.
+struct SpaceMapDropOverlay: View {
+    @Environment(\.colorSchemeContrast) private var contrast
+
+    var body: some View {
+        let ink = PrismInk(contrast)
+        let palette = ModuleID.spaceMap.palette
+        ZStack {
+            RoundedRectangle(cornerRadius: Radius.container, style: .continuous)
+                .fill(Color.black.opacity(0.35))
+            RoundedRectangle(cornerRadius: Radius.container, style: .continuous)
+                .strokeBorder(palette.accent, style: StrokeStyle(lineWidth: 2, dash: [8, 6]))
+            VStack(spacing: Spacing.s) {
+                Image(systemName: "circle.hexagongrid")
+                    .font(.system(size: 30, weight: .light))
+                    .foregroundStyle(palette.accentText)
+                Text("Drop a folder to map it")
+                    .font(SpruceFont.headline)
+                    .foregroundStyle(Ink.primary)
+                Text("A file maps the folder it's in. Nothing is moved or removed.")
+                    .font(SpruceFont.callout)
+                    .foregroundStyle(ink.secondary)
+            }
+            .padding(Spacing.xl)
+        }
+        .padding(Spacing.l)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
     }
 }

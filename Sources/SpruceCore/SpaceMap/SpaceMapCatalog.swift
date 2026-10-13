@@ -174,9 +174,14 @@ public enum SpaceMapCatalog {
     /// Why a node may not be selected for removal (nil = it may be selected).
     ///
     /// Real items are checked against `PathGuard` (the same rules `FileRemover` applies),
-    /// cloud folders are left to Cloud Storage, and ignored paths are honoured.
+    /// cloud folders are left to Cloud Storage, and ignored paths are honoured. With
+    /// `access` (the app passes `SpaceMapPermissions.moveAccess(ofPath:)`), items the user
+    /// can't move themselves are refused up front when administrator rights won't help:
+    /// locked items anywhere, and root-owned (or otherwise unwritable) items outside the
+    /// places where Spruce acts as administrator (`PathGuard.isInPrivilegedZone`).
     public static func protectionReason(for node: SpaceMapNode, guardian: PathGuard,
-                                        settings: SpruceSettings? = nil) -> String? {
+                                        settings: SpruceSettings? = nil,
+                                        access: ((String) -> SpaceMapMoveAccess)? = nil) -> String? {
         switch node.kind {
         case .system:
             return "Managed by macOS; it can't be removed from here"
@@ -198,8 +203,30 @@ public enum SpaceMapCatalog {
         }
         let verdict = guardian.check(path, method: .trash)
         if let reason = verdict.reason { return reason }
+        if let access {
+            switch access(path) {
+            case .userCanMove:
+                break
+            case .locked(let byUser):
+                return byUser ? lockedReason : systemLockedReason
+            case .needsAdministrator(let rootOwned):
+                // Inside the privileged zones FileRemover asks for the password once.
+                if !guardian.isInPrivilegedZone(path) {
+                    return rootOwned ? rootOwnedReason : noPermissionReason
+                }
+            }
+        }
         return nil
     }
+
+    /// Tooltip for root-owned items outside the places where Spruce uses administrator rights.
+    public static let rootOwnedReason = "Owned by the system (root). Spruce only uses administrator rights for apps, their support files, caches, logs and temporary files, so it can't move this"
+    /// Tooltip for other items the user can't move, outside those places.
+    public static let noPermissionReason = "You don't have permission to move this, and Spruce only uses administrator rights for apps, their support files, caches, logs and temporary files"
+    /// Tooltip for items locked in Finder (or inside a locked folder).
+    public static let lockedReason = "Locked. Unlock it (or its folder) in Finder's Get Info window first"
+    /// Tooltip for items macOS protects (System Integrity Protection, system immutable flag).
+    public static let systemLockedReason = "Protected by macOS; not even an administrator can move it"
 
     /// Lowercased, without trailing slashes, `/var`, `/tmp` and `/etc` mapped to `/private`.
     static func normalized(_ path: String) -> String {

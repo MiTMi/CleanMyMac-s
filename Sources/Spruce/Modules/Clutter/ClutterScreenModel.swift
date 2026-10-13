@@ -82,6 +82,13 @@ enum ClutterCopySelection: String, CaseIterable, Identifiable {
     }
 }
 
+/// A short message at the bottom of the module (folders added by a drop or from Finder).
+struct ClutterToast: Identifiable, Equatable {
+    let id = UUID()
+    var message: String
+    var isError = false
+}
+
 /// A source of downloads (app or website) with its totals.
 struct ClutterDownloadSource: Identifiable, Hashable {
     var label: String
@@ -124,6 +131,8 @@ final class ClutterScreenModel {
     var removalRequest: ClutterRemovalRequest?
     var confirmNewScan = false
     var previewURL: URL?
+    /// Shown at the bottom of the module, then dismissed after a few seconds.
+    var toast: ClutterToast?
     /// Mounted volumes, location names and availability, probed off the main thread so
     /// rendering never touches the disk (see `refreshVolumes()`).
     private(set) var locationStatus = ClutterLocationStatus()
@@ -267,16 +276,89 @@ final class ClutterScreenModel {
         panel.message = "Choose folders or disks for Clutter to scan."
         panel.directoryURL = URL(fileURLWithPath: NSHomeDirectory())
         guard panel.runModal() == .OK else { return }
+        addLocations(panel.urls.map(\.path))
+    }
+
+    /// Adds folders or disks to the chosen locations. A folder inside a chosen location is
+    /// already covered; chosen locations inside a new folder give way to it. Returns the
+    /// stored forms of what was added and of what was already covered.
+    @discardableResult
+    func addLocations(_ paths: [String]) -> (added: [String], covered: [String]) {
         var current = locations
-        for url in panel.urls {
-            let stored = ClutterLocations.storedForm(url.path)
+        var added: [String] = []
+        var covered: [String] = []
+        for path in paths {
+            let stored = ClutterLocations.storedForm(path)
             let key = ClutterLocations.canonical(stored)
-            guard !current.contains(where: { ClutterLocations.canonical($0) == key }) else { continue }
+            if current.contains(where: {
+                let existing = ClutterLocations.canonical($0)
+                return existing == key || ClutterPaths.isInside(key, existing)
+            }) {
+                covered.append(stored)
+                continue
+            }
             current.removeAll { ClutterPaths.isInside(ClutterLocations.canonical($0), key) }
-            if current.contains(where: { ClutterPaths.isInside(key, ClutterLocations.canonical($0)) }) { continue }
             current.append(stored)
+            added.append(stored)
         }
-        settings.settings.clutterLocations = current
+        if current != locations {
+            settings.settings.clutterLocations = current
+        }
+        return (added, covered)
+    }
+
+    // MARK: Drops and Finder
+
+    /// Folders dropped on the module or handed over from Finder ("Find Clutter with
+    /// Spruce") join the places Clutter scans; files and app bundles are skipped. It never
+    /// starts a scan or removes anything, and a running scan keeps its locations (the new
+    /// ones count from the next scan). Returns false when nothing could be a folder.
+    @discardableResult
+    func receiveFolders(_ urls: [URL]) -> Bool {
+        let candidates = urls.filter(\.isFileURL).map(\.standardizedFileURL)
+        guard !candidates.isEmpty else { return false }
+        Task { [weak self] in
+            // Reading the items can block on a slow disk: off the main thread.
+            let folders = await Task.detached(priority: .userInitiated) {
+                ClutterScreenModel.folders(in: candidates)
+            }.value
+            self?.adoptFolders(folders, offered: candidates.count)
+        }
+        return true
+    }
+
+    /// Paths of the folders and disks among `urls` (packages such as apps excluded).
+    nonisolated static func folders(in urls: [URL]) -> [String] {
+        urls.compactMap { url -> String? in
+            guard let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .isPackageKey]),
+                  values.isDirectory == true, values.isPackage != true else { return nil }
+            return url.path
+        }
+    }
+
+    private func adoptFolders(_ folders: [String], offered: Int) {
+        guard !folders.isEmpty else {
+            toast = ClutterToast(message: offered == 1
+                                    ? "Clutter looks in folders and disks. Drop a folder instead."
+                                    : "Clutter looks in folders and disks, and none of those is one.",
+                                 isError: true)
+            return
+        }
+        let result = addLocations(folders)
+        if !result.added.isEmpty, case .failed = phase { dismissFailure() }
+        let title = { (path: String) in "“\(self.locationOption(for: path).title)”" }
+        var parts: [String] = []
+        if !result.added.isEmpty {
+            let what = result.added.count == 1 ? title(result.added[0]) : "\(result.added.count) folders"
+            var line = "Added \(what) to the places Clutter looks in."
+            if report != nil || isBusy { line += " The next scan includes \(result.added.count == 1 ? "it" : "them")." }
+            parts.append(line)
+        }
+        if !result.covered.isEmpty {
+            let what = result.covered.count == 1 ? title(result.covered[0]) : "\(result.covered.count) folders"
+            parts.append("\(what) \(result.covered.count == 1 ? "is" : "are") already included.")
+        }
+        toast = ClutterToast(message: parts.joined(separator: " "), isError: result.added.isEmpty)
     }
 
     // MARK: Scanning
@@ -297,15 +379,17 @@ final class ClutterScreenModel {
         steps = []
         let engine = self.engine
         let locations = availableLocations
+        // Built here (not inside the task) so it captures `self` weakly by value.
+        let onProgress: ProgressHandler = { [weak self] p in
+            Task { @MainActor [weak self] in
+                guard let self, self.phase == .scanning else { return }
+                self.progress = p
+                self.steps = Self.steps(from: engine.stageBoard)
+            }
+        }
         task = Task { [weak self] in
             do {
-                let result = try await engine.scanAll(locations: locations, tools: tools) { p in
-                    Task { @MainActor [weak self] in
-                        guard let self, self.phase == .scanning else { return }
-                        self.progress = p
-                        self.steps = Self.steps(from: engine.stageBoard)
-                    }
-                }
+                let result = try await engine.scanAll(locations: locations, tools: tools, progress: onProgress)
                 guard let self, !Task.isCancelled else { return }
                 self.finishScan(result)
             } catch {
@@ -799,13 +883,15 @@ final class ClutterScreenModel {
         phase = .removing
         progress = ScanProgress(fraction: 0, message: "Moving to the Trash…")
         let engine = self.engine
-        task = Task { [weak self] in
-            let result = await engine.remove(request.items, allowRemovingAllCopies: allowRemovingAllCopies) { p in
-                Task { @MainActor [weak self] in
-                    guard let self, self.phase == .removing else { return }
-                    self.progress = p
-                }
+        let onProgress: ProgressHandler = { [weak self] p in
+            Task { @MainActor [weak self] in
+                guard let self, self.phase == .removing else { return }
+                self.progress = p
             }
+        }
+        task = Task { [weak self] in
+            let result = await engine.remove(request.items, allowRemovingAllCopies: allowRemovingAllCopies,
+                                             progress: onProgress)
             guard let self else { return }
             self.outcome = result
             if let updated = engine.lastReport {

@@ -20,9 +20,12 @@ final class AppModel {
     /// Set by any view to request navigation to a module and (optionally) a sub-tool.
     var pendingTool: String?
     /// Files handed to Spruce from Finder (Services menu, a drop on the Dock icon, Open
-    /// With). `openFiles(_:)` navigates to the module that handles them; that module shows
-    /// them — never acts on them — and sets this back to `[]`. See `FileDestination`.
+    /// With). `openFiles(_:)` navigates to the module that handles them; that module takes
+    /// them with `takePendingFiles(for:)` (which sets this back to `[]`) and shows them —
+    /// never acts on them. See `FileDestination`.
     var pendingFiles: [URL] = []
+    /// The module `pendingFiles` are meant for (set with them by `openFiles`).
+    private(set) var pendingFilesModule: ModuleID?
     /// The in-app Notification Center popover (bell in the sidebar, ⇧⌘N).
     var showsInbox = false
     /// The page the Help window shows.
@@ -119,12 +122,16 @@ final class AppModel {
     /// Where a file handed to Spruce from Finder is shown.
     struct FileDestination: Equatable {
         var module: ModuleID
-        var tool: String
+        /// The tool that shows the files (nil: the module's own screen).
+        var tool: String?
 
         static let uninstaller = FileDestination(module: .applications, tool: "applications.uninstaller")
         static let installers = FileDestination(module: .applications, tool: "applications.installers")
         static let spaceMap = FileDestination(module: .spaceMap, tool: "spaceMap")
         static let shredder = FileDestination(module: .toolbox, tool: "toolbox.shredder")
+        /// Folders added to the places Clutter scans ("Find Clutter with Spruce"); only an
+        /// explicit destination, never picked by `of(_:)`.
+        static let clutter = FileDestination(module: .clutter, tool: nil)
 
         /// `.app` → Uninstaller, `.pkg`/`.mpkg` → Installers, folder → Space Map,
         /// anything else → Shredder (staged, unchecked).
@@ -158,8 +165,21 @@ final class AppModel {
             }
         }
         pendingFiles = files
+        pendingFilesModule = files.isEmpty ? nil : target.module
         open(target.module, tool: target.tool)
         showMainWindow()
+    }
+
+    /// Hands the files from Finder to `module`, once: returns them and clears
+    /// `pendingFiles` when they are meant for it and it is on screen; otherwise returns
+    /// `[]` and leaves them for their module.
+    func takePendingFiles(for module: ModuleID) -> [URL] {
+        guard selection == module, !pendingFiles.isEmpty,
+              pendingFilesModule == nil || pendingFilesModule == module else { return [] }
+        let files = pendingFiles
+        pendingFiles = []
+        pendingFilesModule = nil
+        return files
     }
 
     private static func isSystemApp(_ url: URL) -> Bool {

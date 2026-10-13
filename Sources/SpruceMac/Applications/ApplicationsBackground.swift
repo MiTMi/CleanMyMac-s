@@ -384,9 +384,7 @@ public final class ApplicationsTrashWatcher: @unchecked Sendable {
                                                                hasLaunchItem: found.launchItem) else { continue }
             let removed = ApplicationsRemovedApp(bundleID: app.bundleID, name: app.name, trashedPath: path, identity: app.identity)
             ApplicationsRemovedAppStore.shared.update { $0.log.record(removed) }
-            stateLock.lock()
-            recordedAt = Date()
-            stateLock.unlock()
+            stateLock.holding { recordedAt = Date() }
             guard ApplicationsPreferenceStore.shared.preferences.offerLeftoversOnTrash else { continue }
             let message = ApplicationsTrashedAppRules.message(appName: app.name, count: found.count, bytes: found.bytes)
             let id = ApplicationsTrashedAppRules.notificationID(bundleID: app.bundleID)
@@ -505,17 +503,14 @@ public final class ApplicationsUpdateWatch: @unchecked Sendable {
     func runIfDue(now: Date = Date()) async {
         let settings = await ApplicationsMac.settings()
         guard settings.notifyUpdates, let engine else { return }
-        lock.lock()
-        let due = ApplicationsUpdateAlertPlan.isDue(lastCheck: loaded().lastCheck, now: now)
-        let start = due && !isChecking
-        if start { isChecking = true }
-        lock.unlock()
-        guard start else { return }
-        defer {
-            lock.lock()
-            isChecking = false
-            lock.unlock()
+        let start: Bool = lock.holding {
+            let due = ApplicationsUpdateAlertPlan.isDue(lastCheck: loaded().lastCheck, now: now)
+            let begin = due && !isChecking
+            if begin { isChecking = true }
+            return begin
         }
+        guard start else { return }
+        defer { lock.holding { isChecking = false } }
         _ = await engine.loadApps(measureSizes: false)
         let found = await engine.checkUpdates()
         let fresh = await ApplicationsMac.settings()
@@ -551,5 +546,15 @@ public final class ApplicationsUpdateWatch: @unchecked Sendable {
         let value = store.load() ?? ApplicationsUpdateAlertState()
         cached = value
         return value
+    }
+}
+
+private extension NSLock {
+    /// Runs `body` while holding the lock. Unlike `lock()`/`unlock()` it may be called from
+    /// async code (the lock is never held across a suspension point).
+    func holding<T>(_ body: () throws -> T) rethrows -> T {
+        lock()
+        defer { unlock() }
+        return try body()
     }
 }

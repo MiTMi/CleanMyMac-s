@@ -70,9 +70,8 @@ struct ToolboxRootScreen: View {
     /// `AppModel.openFiles` sent to the Toolbox: the Shredder is its only file destination.
     /// They're listed unchecked; shredding still needs the Shredder's confirmation.
     private func consumePendingFiles() {
-        guard model.selection == .toolbox, !model.pendingFiles.isEmpty else { return }
-        let files = model.pendingFiles
-        model.pendingFiles = []
+        let files = model.takePendingFiles(for: .toolbox)
+        guard !files.isEmpty else { return }
         screen.stageForShredding(files)
     }
 }

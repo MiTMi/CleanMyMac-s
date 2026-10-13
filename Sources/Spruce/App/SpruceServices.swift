@@ -3,8 +3,9 @@ import SpruceCore
 import SpruceMac
 
 /// Finder Services (right-click › Services): "Uninstall with Spruce", "Map Folder with
-/// Spruce", "Shred with Spruce". The `NSServices` entries are added to Info.plist by
-/// `scripts/build-app.sh`; each `NSMessage` names one of these methods.
+/// Spruce", "Find Clutter with Spruce", "Shred with Spruce". The `NSServices` entries live
+/// in `Support/Info.plist` (checked by `scripts/build-app.sh`); each `NSMessage` names one
+/// of these methods.
 ///
 /// A Service only *shows* the files in the right tool (via `AppModel.openFiles`); it
 /// never starts a removal — that always needs the tool's own confirmation.
@@ -17,6 +18,12 @@ final class SpruceServices: NSObject {
     @objc func mapFolderWithSpruce(_ pasteboard: NSPasteboard, userData: String?,
                                    error: AutoreleasingUnsafeMutablePointer<NSString?>) {
         route(pasteboard, to: .spaceMap, error: error)
+    }
+
+    /// Adds the folders to the places Clutter scans (it never starts a scan by itself).
+    @objc func findClutterWithSpruce(_ pasteboard: NSPasteboard, userData: String?,
+                                     error: AutoreleasingUnsafeMutablePointer<NSString?>) {
+        route(pasteboard, to: .clutter, error: error)
     }
 
     @objc func shredWithSpruce(_ pasteboard: NSPasteboard, userData: String?,

@@ -268,11 +268,13 @@ final class CloudStorageScreenModel {
         SpruceSound.play(.scanStart)
         let engine = self.engine
         let settings = SettingsStore.shared.settings
+        // Built outside the task so it captures `self` weakly by value.
+        let onTick: CloudStorageScanTickHandler = { [weak self] tick in
+            Task { @MainActor [weak self] in self?.receive(tick) }
+        }
         task = Task { [weak self] in
             do {
-                let result = try await engine.scan(targets, settings: settings, progress: { tick in
-                    Task { @MainActor [weak self] in self?.receive(tick) }
-                })
+                let result = try await engine.scan(targets, settings: settings, progress: onTick)
                 guard let self, !Task.isCancelled else { return }
                 // Files ignored while the scan ran stay out of the results.
                 self.reports = settings == SettingsStore.shared.settings
@@ -440,13 +442,14 @@ final class CloudStorageScreenModel {
         phase = .freeingUp
         let engine = self.engine
         let settings = SettingsStore.shared.settings
+        let onProgress: ProgressHandler = { [weak self] progress in
+            Task { @MainActor [weak self] in
+                guard let self, self.phase == .freeingUp else { return }
+                self.workProgress = progress
+            }
+        }
         task = Task { [weak self] in
-            let result = await engine.freeUpLocally(targets, settings: settings, progress: { progress in
-                Task { @MainActor [weak self] in
-                    guard let self, self.phase == .freeingUp else { return }
-                    self.workProgress = progress
-                }
-            })
+            let result = await engine.freeUpLocally(targets, settings: settings, progress: onProgress)
             guard let self else { return }
             self.reports = result.reports
             self.selection.subtract(result.outcome.removedItemIDs)

@@ -172,6 +172,6 @@ struct ClutterChooseFolderChip: View {
         }
         .buttonStyle(PrismPressStyle())
         .onHover { hovering = $0 }
-        .help("Add a folder or disk to scan")
+        .help("Add a folder or disk to scan. You can also drop folders anywhere on Clutter.")
     }
 }

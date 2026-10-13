@@ -299,12 +299,15 @@ final class PerformanceScreenModel {
         rowStates = Dictionary(uniqueKeysWithValues: ids.map { ($0, PerformanceTaskRowState.queued) })
         runProgress = ScanProgress(fraction: 0, message: "Starting…")
         let engine = self.engine
+        // Built outside the task so they capture `self` weakly by value.
+        let onProgress: ProgressHandler = { [weak self] progress in
+            Task { @MainActor [weak self] in self?.receiveProgress(progress) }
+        }
+        let onEvent: @Sendable (PerformanceTaskEvent) -> Void = { [weak self] event in
+            Task { @MainActor [weak self] in self?.receive(event) }
+        }
         runTask = Task { [weak self] in
-            let results = await engine.runTasks(ids, progress: { progress in
-                Task { @MainActor [weak self] in self?.receiveProgress(progress) }
-            }, onEvent: { event in
-                Task { @MainActor [weak self] in self?.receive(event) }
-            })
+            let results = await engine.runTasks(ids, progress: onProgress, onEvent: onEvent)
             self?.finishRun(results)
         }
     }

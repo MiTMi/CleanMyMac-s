@@ -21,7 +21,7 @@ affiliated with MacPaw.
 | **Toolbox** | Every tool in one searchable hub with favourites, plus Shredder, Screen Cleaning mode, Empty Trash, Free Up RAM, Flush DNS. |
 | **Activity** | Health score with recommendations, monthly stats and charts, timeline, operations log. |
 | **Menu bar monitor** | Health, storage, memory, CPU, network, battery and connected devices, with alerts. |
-| **Mac integration** | Finder Services (Uninstall / Map Folder / Shred with Spruce), drops on the Dock icon, `spruce://open/<module>` links, Dock menu, full main menu with keyboard shortcuts and a local Help window. |
+| **Mac integration** | Finder Services (Uninstall / Map Folder / Find Clutter / Shred with Spruce), drops on the Dock icon and on module windows (apps, folders to map, Clutter locations), `spruce://open/<module>` links, Dock menu, full main menu with keyboard shortcuts and a local Help window. |
 
 ## Safety model
 

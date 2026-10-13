@@ -71,6 +71,9 @@ struct SpaceMapTargetList: View {
                     .font(SpruceFont.bodyStrong)
                     .foregroundStyle(Ink.primary)
                 Spacer()
+                Text("or drop one here")
+                    .font(SpruceFont.caption)
+                    .foregroundStyle(Ink.tertiary)
             }
             .padding(.horizontal, Spacing.m)
             .padding(.vertical, 8)
@@ -81,7 +84,7 @@ struct SpaceMapTargetList: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(PrismPressStyle())
-        .help("Map any folder or disk")
+        .help("Map any folder or disk. You can also drop a folder anywhere on Space Map.")
     }
 }
 

@@ -193,13 +193,24 @@ follows the safety rules below.
   `.focusedSceneValue(\.spruceRows, …)` for the row under the pointer (or last clicked;
   `ItemRow(onHover:)`), so File › Quick Look / Reveal / Copy Path / Ignore act on it.
   Never bind ⌘⌫ / ⇧⌘⌫ or any shortcut that deletes without its confirmation.
-* **Files from Finder:** Services ("Uninstall with Spruce", "Map Folder with Spruce", "Shred
-  with Spruce"), drops on the Dock icon and Open With call `AppModel.openFiles(_:)`, which
-  navigates (`.app` → `applications.uninstaller`, `.pkg` → `applications.installers`,
-  folder → `spaceMap`, other → `toolbox.shredder`) and puts the files in
-  `AppModel.pendingFiles`. The target module shows them — Uninstaller opens that app's
-  detail, Space Map roots its map there, Shredder stages them unchecked — then sets
-  `pendingFiles = []`. Never start a removal from a Service or a drop.
+* **Files from Finder:** Services ("Uninstall with Spruce", "Map Folder with Spruce", "Find
+  Clutter with Spruce", "Shred with Spruce"), drops on the Dock icon and Open With call
+  `AppModel.openFiles(_:as:)`, which navigates (`.app` → `applications.uninstaller`, `.pkg` →
+  `applications.installers`, folder → `spaceMap`, other → `toolbox.shredder`; the Clutter
+  Service passes `FileDestination.clutter` explicitly) and puts the files in
+  `AppModel.pendingFiles` (with `pendingFilesModule`). The target module takes them with
+  `model.takePendingFiles(for: <its ModuleID>)` (only while it is on screen; it clears them)
+  and shows them — Uninstaller opens that app's detail, Space Map roots its map there (a file
+  maps its folder), Clutter adds the folders to its scan locations, Shredder stages them
+  unchecked. Drops on a module's window do the same: Applications (apps, installers), Space
+  Map (a folder, also on the location cards) and Clutter (folders → locations, with a toast).
+  Never start a removal from a Service or a drop (mapping a folder is fine; Clutter only adds
+  locations and waits for Scan).
+* **Space Map selection:** `SpaceMapCatalog.protectionReason(for:guardian:settings:access:)`
+  with `SpaceMapPermissions.moveAccess(ofPath:)` refuses, before selection (lock + tooltip),
+  items locked in Finder or by macOS, and items the user can't move themselves (root-owned,
+  unwritable folder, sticky folder) outside `PathGuard.isInPrivilegedZone`, where
+  `FileRemover` would refuse to escalate anyway.
 * **Links:** `spruce://open/<module>[?tool=<tool id>]`, `spruce://checkup[?autostart=1]`,
   `spruce://inbox` (navigation only; tool ids must belong to the module). The Dock menu
   offers Run Checkup, Empty Trash…, Free Up Memory… (they open the tool, which confirms)

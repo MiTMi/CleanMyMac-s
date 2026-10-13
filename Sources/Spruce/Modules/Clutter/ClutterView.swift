@@ -15,11 +15,13 @@ struct ClutterView: View {
 }
 
 /// Hosts the Clutter journey (locations → scanning → dashboard and tools → Trash → done),
-/// routes `clutter.*` tool ids and owns the shared confirmations and Quick Look.
+/// routes `clutter.*` tool ids, adds folders dropped on it or handed over from Finder to
+/// the places it scans, and owns the shared confirmations and Quick Look.
 struct ClutterRootScreen: View {
     @Environment(AppModel.self) private var model
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var screen: ClutterScreenModel
+    @State private var isDropTargeted = false
 
     init(engine: ClutterEngine) {
         _screen = State(initialValue: ClutterScreenModel.shared(for: engine))
@@ -30,14 +32,29 @@ struct ClutterRootScreen: View {
             content
                 .id(routeKey)
                 .transition(.prismPhase(reduceMotion: reduceMotion))
+            if isDropTargeted {
+                ClutterDropOverlay()
+                    .transition(.opacity)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .overlay(alignment: .bottom) { ClutterToastHost(screen: screen) }
         .animation(Motion.adaptive(Motion.standard, reduceMotion: reduceMotion), value: routeKey)
+        .animation(Motion.quick, value: isDropTargeted)
+        // Folders dropped anywhere on the module join the places Clutter scans. A drop never
+        // starts a scan or removes anything.
+        .dropDestination(for: URL.self) { urls, _ in
+            screen.receiveFolders(urls)
+        } isTargeted: { targeted in
+            isDropTargeted = targeted
+        }
         .onAppear {
             screen.refreshVolumes()
             consumePendingTool()
+            consumePendingFiles()
         }
         .onChange(of: model.pendingTool) { _, _ in consumePendingTool() }
+        .onChange(of: model.pendingFiles) { _, _ in consumePendingFiles() }
         // Location names, free space and availability are probed off the main thread;
         // probe again whenever they may have changed.
         .onChange(of: screen.locations) { _, _ in screen.refreshVolumes() }
@@ -138,5 +155,69 @@ struct ClutterRootScreen: View {
         guard let toolID = model.pendingTool, let tool = ClutterTool(toolID: toolID) else { return }
         model.pendingTool = nil
         screen.open(tool)
+    }
+
+    /// Folders from Finder ("Find Clutter with Spruce") join the places Clutter scans.
+    private func consumePendingFiles() {
+        let files = model.takePendingFiles(for: .clutter)
+        guard !files.isEmpty else { return }
+        screen.receiveFolders(files)
+    }
+}
+
+/// Shown while folders are dragged over Clutter.
+struct ClutterDropOverlay: View {
+    @Environment(\.colorSchemeContrast) private var contrast
+
+    var body: some View {
+        let ink = PrismInk(contrast)
+        let palette = ModuleID.clutter.palette
+        ZStack {
+            RoundedRectangle(cornerRadius: Radius.container, style: .continuous)
+                .fill(Color.black.opacity(0.35))
+            RoundedRectangle(cornerRadius: Radius.container, style: .continuous)
+                .strokeBorder(palette.accent, style: StrokeStyle(lineWidth: 2, dash: [8, 6]))
+            VStack(spacing: Spacing.s) {
+                Image(systemName: "folder.badge.plus")
+                    .font(.system(size: 30, weight: .light))
+                    .foregroundStyle(palette.accentText)
+                Text("Drop folders to look for clutter in them")
+                    .font(SpruceFont.headline)
+                    .foregroundStyle(Ink.primary)
+                Text("They join the places Clutter scans. Nothing is scanned or removed until you say so.")
+                    .font(SpruceFont.callout)
+                    .foregroundStyle(ink.secondary)
+            }
+            .padding(Spacing.xl)
+        }
+        .padding(Spacing.l)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+}
+
+/// Bottom toast that dismisses itself after six seconds.
+struct ClutterToastHost: View {
+    @Bindable var screen: ClutterScreenModel
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        ZStack {
+            if let toast = screen.toast {
+                PrismToast(message: toast.message,
+                           symbol: toast.isError ? "exclamationmark.triangle.fill" : "checkmark.circle.fill",
+                           tint: toast.isError ? StatusColor.warning : StatusColor.success)
+                    .frame(maxWidth: 640)
+                    .padding(.bottom, Spacing.l)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                    .id(toast.id)
+            }
+        }
+        .animation(Motion.adaptive(Motion.standard, reduceMotion: reduceMotion), value: screen.toast?.id)
+        .task(id: screen.toast?.id) {
+            guard let id = screen.toast?.id else { return }
+            try? await Task.sleep(nanoseconds: 6_000_000_000)
+            if screen.toast?.id == id { screen.toast = nil }
+        }
     }
 }

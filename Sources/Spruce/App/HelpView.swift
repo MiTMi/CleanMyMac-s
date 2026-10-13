@@ -279,9 +279,11 @@ enum HelpContent {
         case .applications:
             return ["Apps that come with macOS can't be uninstalled; macOS restores them with every update."]
         case .clutter:
-            return ["Files go to the Trash, so you can put them back."]
+            return ["Files go to the Trash, so you can put them back.",
+                    "Drop folders on Clutter (or use Finder › Services › Find Clutter with Spruce) to add them to the places it looks in."]
         case .spaceMap:
-            return ["Folders macOS manages can't be selected."]
+            return ["Folders macOS manages can't be selected, nor can items owned by the system outside app, support, cache, log and temporary folders.",
+                    "Drop a folder on Space Map (or use Finder › Services › Map Folder with Spruce) to map it."]
         default:
             return []
         }

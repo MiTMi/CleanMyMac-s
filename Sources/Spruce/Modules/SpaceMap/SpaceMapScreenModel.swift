@@ -189,17 +189,39 @@ final class SpaceMapScreenModel {
     }
 
     /// A folder handed over from Finder ("Map Folder with Spruce", a drop on the Dock icon,
-    /// Open With): list it, select it and map it. Nothing is ever removed from here.
+    /// Open With) or dropped on the window: list it, select it and map it. A file maps the
+    /// folder it is in; an item that no longer exists is ignored. Nothing is ever removed
+    /// from here.
     func mapFolder(_ url: URL) {
         let engine = self.engine
         let model = self
         Task {
-            let target = await Task.detached(priority: .userInitiated) { engine.target(forFolder: url) }.value
+            // The file system and volume queries run off the main thread.
+            let target: SpaceMapTarget? = await Task.detached(priority: .userInitiated) { () -> SpaceMapTarget? in
+                var isDirectory: ObjCBool = false
+                guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) else { return nil }
+                return engine.target(forFolder: isDirectory.boolValue ? url : url.deletingLastPathComponent())
+            }.value
+            guard let target else { return }
             model.adopt(target)
             // A removal in progress finishes first; the folder stays selected in the picker.
             guard model.phase != .removing else { return }
             model.scan(target)
         }
+    }
+
+    // MARK: Drops
+
+    /// Drops are taken except while items are being moved to the Trash.
+    var acceptsDrops: Bool { phase != .removing }
+
+    /// A folder (or disk) dropped on the window or on a location card is mapped; a file
+    /// maps the folder it is in. Only the first item counts. Returns false when refused.
+    @discardableResult
+    func receiveDrop(_ urls: [URL]) -> Bool {
+        guard acceptsDrops, let first = urls.first(where: \.isFileURL) else { return false }
+        mapFolder(first.standardizedFileURL)
+        return true
     }
 
     // MARK: Scan
@@ -378,10 +400,16 @@ final class SpaceMapScreenModel {
     var selectedBytes: Int64 { selection.reduce(0) { $0 + $1.size } }
     var selectedFiles: Int { selection.reduce(0) { $0 + max(1, $1.fileCount) } }
 
+    /// Why `node` can't be selected (nil = selectable), cached per tree revision. Besides
+    /// PathGuard, the ignore list and cloud folders, items the user can't move themselves
+    /// are refused before they are selected when administrator rights won't help: locked
+    /// items, and root-owned items outside the places where Spruce acts as administrator
+    /// (`PathGuard.isInPrivilegedZone`). The list and the hover card show the reason.
     func protection(of node: SpaceMapNode) -> SpaceMapProtection {
         if let cached = protectionCache[node.id] { return cached }
         let reason = SpaceMapCatalog.protectionReason(for: node, guardian: FileRemover.shared.guardian,
-                                                      settings: SettingsStore.shared.settings)
+                                                      settings: SettingsStore.shared.settings,
+                                                      access: { SpaceMapPermissions.moveAccess(ofPath: $0) })
         let value = SpaceMapProtection(reason: reason)
         protectionCache[node.id] = value
         return value

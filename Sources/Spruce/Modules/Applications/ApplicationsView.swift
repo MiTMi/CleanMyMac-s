@@ -103,13 +103,11 @@ struct ApplicationsRootScreen: View {
 
     /// Apps and installers handed over from Finder (Services, Open With, the Dock icon).
     private func consumePendingFiles() {
-        guard model.selection == .applications, !model.pendingFiles.isEmpty else { return }
-        let files = model.pendingFiles.filter { url in
+        let files = model.takePendingFiles(for: .applications).filter { url in
             let ext = url.pathExtension.lowercased()
             return ext == "app" || ApplicationsScreenModel.installerExtensions.contains(ext)
         }
         guard !files.isEmpty else { return }
-        model.pendingFiles = []
         screen.receive(files)
     }
 }
