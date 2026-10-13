@@ -57,7 +57,11 @@ Never edit another module's folders.
   `Permissions`, `Notifier`, `SettingsStore.shared`, `HistoryStore.shared`.
 * `PrivilegedRunner.run([Invocation])` — allowlisted root executables with quoted args
   (launchctl, tmutil, sfltool, profiles, mdutil, killall, kill, purge, dscacheutil,
-  pkgutil, log). Need another executable? Ask the integrator in your report.
+  pkgutil, log, tccutil). Each executable also has an argument validator
+  (`PrivilegedRunner.refusal(for:)`): launchctl job verbs only and never a job macOS ships,
+  `tccutil reset <Service> <bundle id>` only, read-only verbs for profiles/log/pkgutil
+  (plus `pkgutil --forget <non-Apple id>`), restartable daemons only for killall. Anything
+  else throws before the prompt. Need another executable or verb? Ask the integrator.
 * `CategoryDescriptor` (Models.swift). The Cleanup module must provide
   `public enum CleanupCatalog { public static var categories: [CategoryDescriptor] }`
   in `Sources/SpruceCore/Cleanup/`; Settings uses it.
@@ -105,11 +109,48 @@ follows the safety rules below.
 ## Integration notes (from finished modules — read if you build Settings, Onboarding, Toolbox or Activity)
 
 * **Admin Trash:** `PrivilegedRunner.trashPaths(_:guardian:options:)` moves root-owned items
-  into the user's Trash (one prompt); `FileRemover.dispose(..., escalate: true)` now uses it
-  automatically for `.trash` items that fail with a permission error, and passes its
-  `options` to `removePaths` for `.remove` items. `/usr/bin/tccutil` is an allowed admin tool.
-* **Alerts:** `Notifier.post(id:title:body:module:tool:)` adds a "Review" action that opens
-  `module`/`tool` (routed by the AppDelegate). `AppModel.shared` is the single app model.
+  into the user's Trash (one prompt); `FileRemover.dispose(..., escalate: true)` uses it
+  automatically for `.trash` items that fail with a permission error, and `removePaths` for
+  `.remove` items. Items keep their owner (root never runs `chown`): they land in a new
+  root-owned folder "Spruce Admin Trash …" inside the Trash, so emptying it asks for the
+  password again (`FileRemover.emptyTrash` escalates). Items on another disk are refused.
+  Both root scripts re-check, by device + inode, the parent folder and the item they act
+  on, so a path swapped during the password prompt can't redirect root.
+* **Where root may act:** escalation only happens where `PathGuard.checkPrivileged(_:method:options:)`
+  allows it — the home folder, `/Applications`, vendor folders in `/Library` (Application
+  Support, Caches, Logs, Preferences, Launch*, PrivilegedHelperTools, plug-in folders,
+  Developer), `/Users/Shared`, `/opt`, system logs/temp, the user's own `$TMPDIR`/cache
+  folder and external `.Trashes/<uid>`. Other permission failures are reported per item.
+* **PathGuard (tightened):** system state in `/private/var` (except `log`, `tmp` and the
+  per-user `T`/`C` folders in `/private/var/folders`), `/Library/Preferences/com.apple.*`,
+  `SystemConfiguration`, `OpenDirectory`, `Logging` and `/Library/Managed Preferences`
+  are refused for every method. iOS backups and Xcode archives are no longer permanent
+  zones (Trash only). Inside the user's Trash, name markers (wallet, 1password…) don't
+  block emptying. `PathGuard.key` / `isStrictlyInside` / `isInsideOrEqual` are public.
+* **Stop:** after a cancelled run `FileRemover` never prompts for administrator rights; the
+  items it had queued for the prompt fail with `FileRemover.stoppedReason`, and
+  `PrivilegedRunner` refuses to start a prompt once the task is cancelled.
+* **Trash accounting and Put Back:** `RunOutcome.trashedBytes` / `trashedCount` (part of
+  `freedBytes` that only returns once the Trash is emptied) and `trashRunIDs` (decode as
+  zero/empty from older files; `RunOutcome.merged` sums them — engines that build their own
+  outcome from `dispose` results should copy them). `TrashLedger.shared` records where every
+  trashed item went: `restorable(runIDs:)`, `putBack(runIDs:)`, `TrashLedger.openTrash()`.
+  `ScanFlowModel` exposes `canPutBack`, `restorableCount`, `putBack()`, `openTrash()`,
+  `putBackResult` for `DoneView` ("N items (X) are in the Trash. Empty it to get the space
+  back." + Open Trash / Put Back All). `RunOutcome.didAnything` = processed or freed > 0.
+* **AppleScript:** in-process `NSAppleScript` must run through `AppleScriptExecutor.shared`
+  (one serial queue; `run(_:)`, or `queue` + `executeNow(_:)`). `PrivilegedRunner` does.
+* **History:** `HistoryStore.record(_ entries: [ActivityEntry])` records several entries with
+  one save; saves are coalesced (~1 s, background, compact JSON) and records made off the
+  main thread are applied on the main thread. `ScanFlowModel` records a run only when
+  `didAnything`. `HistoryStore.flush()` runs at quit.
+* **Alerts:** `Notifier.post(id:title:body:module:tool:kind:)` adds a "Review" action that opens
+  `module`/`tool` (routed by the AppDelegate, which reopens a closed main window via
+  `AppModel.showMainWindow()`). Sounds follow Settings › Play sounds. Every alert is also
+  kept in the in-app Notification Center (`InboxStore.shared`, bell in the sidebar, ⇧⌘N);
+  `Notifier.keep(kind:title:body:module:tool:)` adds an inbox-only message (never offers
+  or news). Finished runs recorded with `HistoryStore.record(_:kind:)` and Checkup markers
+  appear there as results. `AppModel.shared` is the single app model.
 * **History kinds:** `ActivityEntry.Kind.checkup` is a zero-byte marker for a whole Checkup
   run (bytes live on the per-module entries with the same date — don't count it twice);
   `.startupItems` = login/background items turned off or removed.
@@ -122,8 +163,30 @@ follows the safety rules below.
 * **Toolbox:** Free Up RAM / Flush DNS should call
   `model.performance.runTasks([.freeRAM], progress:)` / `runTasks([.flushDNS], progress:)`
   (never throws; `PerformanceRunSummary.outcome(_:)` converts results to a `RunOutcome`).
-* **Health score:** reuse `SystemMonitor.shared.health` / `MonitorHealth.assess(_:context:)`
-  (SpruceCore/Monitor) so the app and the menu bar show the same score.
+* **Health score:** `AppModel.healthReport` (`ActivityHealth.assess(model.healthInput())`) is
+  the one Mac Health score. The sidebar pill reads it; Activity's gauge and the menu bar
+  header/status icon should read it too (the monitor's `SystemMonitor.shared.health` stays
+  the system part of it and the source of the live issue lines).
+* **Main menu:** File (Quick Look ⌘Y, Reveal ⇧⌘R, Copy Path ⌥⌘C, Ignore), Edit (Select All
+  Items, Deselect All ⌥⌘A, Select Recommended), View (Notification Center ⇧⌘N, Mac Health),
+  Scan (Scan Again ⌘R, Stop ⌘., Run Selected… ⌘↩), Go (⌘1–⌘9, Activity ⇧⌘A) and Help
+  (Help window `id: "help"` with `AppModel.showHelp(_:)`, Keyboard Shortcuts ⌘/). Screens
+  enable Scan/Edit items by publishing `.focusedSceneValue(\.spruceFlow, SpruceFlowActions(…))`
+  (`ScanFlowModel.menuActions` builds one; `reviewAndRun` must only open the screen's own
+  confirmation) and review lists enable File items with `.focusedSceneValue(\.spruceRows, …)`.
+  Never bind ⌘⌫ / ⇧⌘⌫ or any shortcut that deletes without its confirmation.
+* **Files from Finder:** Services ("Uninstall with Spruce", "Map Folder with Spruce", "Shred
+  with Spruce"), drops on the Dock icon and Open With call `AppModel.openFiles(_:)`, which
+  navigates (`.app` → `applications.uninstaller`, `.pkg` → `applications.installers`,
+  folder → `spaceMap`, other → `toolbox.shredder`) and puts the files in
+  `AppModel.pendingFiles`. The target module shows them — Uninstaller opens that app's
+  detail, Space Map roots its map there, Shredder stages them unchecked — then sets
+  `pendingFiles = []`. Never start a removal from a Service or a drop.
+* **Links:** `spruce://open/<module>[?tool=<tool id>]`, `spruce://checkup[?autostart=1]`,
+  `spruce://inbox` (navigation only; tool ids must belong to the module). The Dock menu
+  offers Run Checkup, Empty Trash…, Free Up Memory… (they open the tool, which confirms)
+  and Open ▸ module. Info.plist keys for links, Services and document types are added by
+  `scripts/build-app.sh`.
 
 ## Safety rules (non-negotiable)
 

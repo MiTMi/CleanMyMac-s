@@ -61,6 +61,73 @@ final class PathGuardTests: XCTestCase {
         XCTAssertFalse(guardian.check("/var/root/x").isAllowed)
         XCTAssertEqual(PathGuard.key("/var/log/x"), "/private/var/log/x")
     }
+
+    func testSystemStateInVarAndPreferencesIsProtected() {
+        for p in ["/Library/Preferences/SystemConfiguration", "/Library/Preferences/SystemConfiguration/preferences.plist",
+                  "/Library/Preferences/com.apple.loginwindow.plist", "/Library/Preferences/com.apple.alf.plist",
+                  "/Library/Preferences/.GlobalPreferences.plist", "/Library/Managed Preferences/x.plist",
+                  "/private/var/run/x", "/var/at/tabs", "/private/var/spool/cron", "/private/var/networkd/x",
+                  "/private/var/folders/ab", "/private/var/folders/ab/xyz", "/var/folders/ab/xyz/T",
+                  "/private/var/folders/ab/xyz/C", "/private/var/folders/ab/xyz/0/com.apple.LaunchServices",
+                  "/private/var/folders/zz/zyxvpxvq6csfxvn_n0000000000000/-Caches-/x"] {
+            XCTAssertFalse(guardian.check(p, method: .trash).isAllowed, "should deny \(p)")
+        }
+        // Third-party preferences, logs, temporary files and per-user temp/cache contents stay reachable.
+        XCTAssertTrue(guardian.check("/Library/Preferences/com.vendor.app.plist", method: .trash).isAllowed)
+        XCTAssertTrue(guardian.check("/private/var/log/vendor.log", method: .remove).isAllowed)
+        XCTAssertTrue(guardian.check("/var/tmp/vendor-file", method: .remove).isAllowed)
+        XCTAssertTrue(guardian.check("/private/var/folders/ab/xyz/T/com.vendor/x", method: .remove).isAllowed)
+        XCTAssertTrue(guardian.check("/var/folders/ab/xyz/C/com.vendor", method: .remove).isAllowed)
+    }
+
+    func testIrreplaceableDataIsNeverDeletedPermanently() {
+        let backup = "/Users/test/Library/Application Support/MobileSync/Backup/00008101-000A"
+        let archive = "/Users/test/Library/Developer/Xcode/Archives/2026-01-01/App.xcarchive"
+        for p in [backup, archive] {
+            XCTAssertFalse(guardian.check(p, method: .remove).isAllowed, "\(p) must not be deleted permanently")
+            XCTAssertTrue(guardian.check(p, method: .trash).isAllowed, "\(p) may go to the Trash")
+        }
+    }
+
+    func testPrivilegedAllowlist() {
+        let g = PathGuard(home: "/Users/test", userTemporaryDirectory: "/var/folders/ab/xyz/T/", uid: 501)
+        XCTAssertEqual(g.userVarFolder, "/private/var/folders/ab/xyz")
+        // Places root may act.
+        XCTAssertTrue(g.checkPrivileged("/Applications/Foo.app", options: .allowAppBundles).isAllowed)
+        XCTAssertTrue(g.checkPrivileged("/Library/Application Support/Vendor").isAllowed)
+        XCTAssertTrue(g.checkPrivileged("/Library/Caches/com.vendor", method: .remove).isAllowed)
+        XCTAssertTrue(g.checkPrivileged("/Library/PrivilegedHelperTools/com.vendor.helper").isAllowed)
+        XCTAssertTrue(g.checkPrivileged("/Library/LaunchDaemons/com.vendor.plist", options: .allowLaunchItems).isAllowed)
+        XCTAssertTrue(g.checkPrivileged("/Users/test/.Trash/Old.app", method: .remove, options: .allowAppBundles).isAllowed)
+        XCTAssertTrue(g.checkPrivileged("/private/var/folders/ab/xyz/T/thing", method: .remove).isAllowed)
+        XCTAssertTrue(g.checkPrivileged("/Volumes/Ext/.Trashes/501/old", method: .remove).isAllowed)
+        // Allowed for the user, refused as administrator.
+        XCTAssertTrue(g.check("/Library/Fonts/Vendor.otf").isAllowed)
+        XCTAssertFalse(g.checkPrivileged("/Library/Fonts/Vendor.otf").isAllowed)
+        XCTAssertTrue(g.check("/private/var/folders/cd/other/T/x", method: .remove).isAllowed)
+        XCTAssertFalse(g.checkPrivileged("/private/var/folders/cd/other/T/x", method: .remove).isAllowed)
+        XCTAssertFalse(g.checkPrivileged("/Volumes/Ext/.Trashes/502/old", method: .remove).isAllowed)
+        XCTAssertFalse(g.checkPrivileged("/Volumes/Ext/Projects/x").isAllowed)
+        XCTAssertFalse(g.checkPrivileged("/Library/Extensions/Vendor.kext").isAllowed)
+        // Never, whatever the method.
+        XCTAssertFalse(g.checkPrivileged("/Library/Preferences/SystemConfiguration").isAllowed)
+        XCTAssertFalse(g.checkPrivileged("/private/var/folders/ab/xyz/0/x").isAllowed)
+    }
+
+    func testVarFolderDetection() {
+        XCTAssertEqual(PathGuard.varFolder(ofTemporaryDirectory: "/private/var/folders/AB/Xyz_12/T"), "/private/var/folders/ab/xyz_12")
+        XCTAssertNil(PathGuard.varFolder(ofTemporaryDirectory: "/tmp/"))
+        XCTAssertNil(PathGuard.varFolder(ofTemporaryDirectory: "/private/var/folders/ab/xyz/C"))
+    }
+
+    func testEmptyingTheTrashIgnoresNameMarkers() {
+        // The user already threw these away; emptying the Trash must be able to finish.
+        XCTAssertTrue(guardian.check("/Users/test/.Trash/1Password 7 Backup", method: .remove).isAllowed)
+        XCTAssertTrue(guardian.check("/Users/test/.Trash/wallet.dat", method: .remove).isAllowed)
+        // …but nowhere else.
+        XCTAssertFalse(guardian.check("/Users/test/Documents/wallet.dat", method: .trash).isAllowed)
+        XCTAssertFalse(guardian.check("/Users/test/Library/Caches/com.1password.x", method: .remove).isAllowed)
+    }
 }
 
 final class FormatTests: XCTestCase {
@@ -118,6 +185,33 @@ final class ModelTests: XCTestCase {
         XCTAssertEqual(s.filteringIgnored(groups).allItems.count, 1)
     }
 
+    func testRunOutcomeDecodesOlderFilesAndMergesTrash() throws {
+        let json = #"{"module":"cleanup","date":"2026-01-01T00:00:00Z","freedBytes":10,"processedCount":1,"removedItemIDs":["a"],"failures":[],"summary":"x"}"#
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let old = try decoder.decode(RunOutcome.self, from: Data(json.utf8))
+        XCTAssertEqual(old.freedBytes, 10)
+        XCTAssertEqual(old.trashedBytes, 0)
+        XCTAssertTrue(old.trashRunIDs.isEmpty)
+
+        let run = UUID()
+        let a = RunOutcome(module: .cleanup, freedBytes: 100, processedCount: 2, trashedBytes: 60, trashedCount: 1, trashRunIDs: [run])
+        let b = RunOutcome(module: .cleanup, freedBytes: 5, processedCount: 1)
+        let merged = RunOutcome.merged([a, b], module: .cleanup)
+        XCTAssertEqual(merged.freedBytes, 105)
+        XCTAssertEqual(merged.trashedBytes, 60)
+        XCTAssertEqual(merged.trashedCount, 1)
+        XCTAssertEqual(merged.trashRunIDs, [run])
+        XCTAssertTrue(merged.didAnything)
+        XCTAssertFalse(RunOutcome(module: .cleanup).didAnything)
+
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let roundTrip = try decoder.decode(RunOutcome.self, from: encoder.encode(a))
+        XCTAssertEqual(roundTrip.trashRunIDs, [run])
+        XCTAssertEqual(roundTrip.trashedBytes, 60)
+    }
+
     func testSettingsDecodeLeniently() throws {
         let json = #"{"playSounds": false, "unknownKey": 3}"#
         let s = try JSONDecoder().decode(SpruceSettings.self, from: Data(json.utf8))
@@ -172,5 +266,81 @@ final class FileWalkerTests: XCTestCase {
         XCTAssertEqual(matches.map { ($0 as NSString).lastPathComponent }, ["one.bin"])
         XCTAssertEqual(PathGlob.expand(root.path + "/*/b").count, 1)
         XCTAssertTrue(PathGlob.expand(root.path + "/nope/*").isEmpty)
+    }
+}
+
+final class PersistenceTests: XCTestCase {
+    var dir: URL!
+
+    override func setUpWithError() throws {
+        dir = FileManager.default.temporaryDirectory.appendingPathComponent("spruce-persist-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    }
+
+    override func tearDownWithError() throws {
+        try? FileManager.default.removeItem(at: dir)
+    }
+
+    func testOperationLogTailAndRotation() {
+        let log = OperationLog(url: dir.appendingPathComponent("operations.log"), rotationSize: 4_000)
+        for i in 0..<200 {
+            log.record(module: .cleanup, action: "remove", result: "ok", bytes: Int64(i), detail: "/tmp/item-\(i)")
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: log.rotatedURL.path), "the log rotates at its size cap")
+        let size = (try? FileManager.default.attributesOfItem(atPath: log.url.path)[.size] as? NSNumber)?.intValue ?? 0
+        XCTAssertLessThan(size, 4_200)
+        let last = log.tail(3)
+        XCTAssertEqual(last.count, 3)
+        XCTAssertTrue(last[2].hasSuffix("/tmp/item-199"))
+        XCTAssertTrue(last[1].hasSuffix("/tmp/item-198"))
+        // More lines than the current file holds come from the rotated file, in order.
+        let many = log.tail(80)
+        XCTAssertEqual(many.count, 80)
+        XCTAssertTrue(many.last!.hasSuffix("/tmp/item-199"))
+        XCTAssertTrue(many.first!.hasSuffix("/tmp/item-120"))
+        XCTAssertEqual(log.tail(0), [])
+    }
+
+    func testOperationLogTailReadsBackwardsAcrossChunks() throws {
+        let url = dir.appendingPathComponent("big.log")
+        var text = ""
+        for i in 0..<5_000 { text += "line \(i) " + String(repeating: "x", count: 40) + "\n" }
+        try text.write(to: url, atomically: true, encoding: .utf8)
+        let lines = OperationLog.lastLines(of: url, count: 2_000)
+        XCTAssertEqual(lines.count, 2_000)
+        XCTAssertTrue(lines.first!.hasPrefix("line 3000 "))
+        XCTAssertTrue(lines.last!.hasPrefix("line 4999 "))
+    }
+
+    func testOperationLogRecoversWhenTheFileIsDeleted() throws {
+        let log = OperationLog(url: dir.appendingPathComponent("operations.log"))
+        log.record(module: .cleanup, action: "remove", result: "ok", detail: "first")
+        try FileManager.default.removeItem(at: log.url)
+        log.record(module: .cleanup, action: "remove", result: "ok", detail: "second")
+        XCTAssertEqual(log.tail(5).count, 1)
+        XCTAssertTrue(log.tail(5)[0].hasSuffix("second"))
+    }
+
+    func testOperationLogFollowsAReplacedFile() throws {
+        let log = OperationLog(url: dir.appendingPathComponent("operations.log"))
+        log.record(module: .cleanup, action: "remove", result: "ok", detail: "first")
+        // An editor saving the file atomically swaps in a new inode.
+        try "edited\n".write(to: log.url, atomically: true, encoding: .utf8)
+        log.record(module: .cleanup, action: "remove", result: "ok", detail: "second")
+        let lines = log.tail(5)
+        XCTAssertEqual(lines.count, 2)
+        XCTAssertEqual(lines.first, "edited")
+        XCTAssertTrue(lines.last!.hasSuffix("second"))
+    }
+
+    func testCompactJSONStoreRoundTrip() throws {
+        let store = JSONFileStore<ActivityHistory>(url: dir.appendingPathComponent("history.json"), prettyPrinted: false)
+        var history = ActivityHistory()
+        history.append(ActivityEntry(date: Date(timeIntervalSince1970: 1_800_000_000), module: .cleanup, kind: .clean,
+                                     bytes: 5, count: 1, summary: "x"))
+        try store.save(history)
+        let text = try String(contentsOf: store.url, encoding: .utf8)
+        XCTAssertFalse(text.contains("\n"), "compact output has no line breaks")
+        XCTAssertEqual(store.load(), history)
     }
 }

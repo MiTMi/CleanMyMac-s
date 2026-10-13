@@ -365,6 +365,13 @@ public struct RunOutcome: Codable, Hashable, Sendable {
     public var failures: [ItemFailure]
     /// Short human summary ("Removed 1,204 files").
     public var summary: String
+    /// The part of `freedBytes` that was moved to the Trash (it only comes back once the
+    /// Trash is emptied). Always ≤ `freedBytes`.
+    public var trashedBytes: Int64
+    /// How many of the processed items went to the Trash.
+    public var trashedCount: Int
+    /// `TrashLedger` runs that hold where each trashed item went (for Put Back).
+    public var trashRunIDs: [UUID]
 
     public init(
         module: ModuleID,
@@ -373,7 +380,10 @@ public struct RunOutcome: Codable, Hashable, Sendable {
         processedCount: Int = 0,
         removedItemIDs: [String] = [],
         failures: [ItemFailure] = [],
-        summary: String = ""
+        summary: String = "",
+        trashedBytes: Int64 = 0,
+        trashedCount: Int = 0,
+        trashRunIDs: [UUID] = []
     ) {
         self.module = module
         self.date = date
@@ -382,7 +392,33 @@ public struct RunOutcome: Codable, Hashable, Sendable {
         self.removedItemIDs = removedItemIDs
         self.failures = failures
         self.summary = summary
+        self.trashedBytes = trashedBytes
+        self.trashedCount = trashedCount
+        self.trashRunIDs = trashRunIDs
     }
+
+    private enum CodingKeys: String, CodingKey {
+        case module, date, freedBytes, processedCount, removedItemIDs, failures, summary
+        case trashedBytes, trashedCount, trashRunIDs
+    }
+
+    /// Older files have no Trash fields; they decode as zero.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        module = try c.decode(ModuleID.self, forKey: .module)
+        date = try c.decode(Date.self, forKey: .date)
+        freedBytes = try c.decodeIfPresent(Int64.self, forKey: .freedBytes) ?? 0
+        processedCount = try c.decodeIfPresent(Int.self, forKey: .processedCount) ?? 0
+        removedItemIDs = try c.decodeIfPresent([String].self, forKey: .removedItemIDs) ?? []
+        failures = try c.decodeIfPresent([ItemFailure].self, forKey: .failures) ?? []
+        summary = try c.decodeIfPresent(String.self, forKey: .summary) ?? ""
+        trashedBytes = try c.decodeIfPresent(Int64.self, forKey: .trashedBytes) ?? 0
+        trashedCount = try c.decodeIfPresent(Int.self, forKey: .trashedCount) ?? 0
+        trashRunIDs = try c.decodeIfPresent([UUID].self, forKey: .trashRunIDs) ?? []
+    }
+
+    /// True when something was processed or freed (worth a history entry).
+    public var didAnything: Bool { processedCount > 0 || freedBytes > 0 }
 
     public static func merged(_ outcomes: [RunOutcome], module: ModuleID, summary: String = "") -> RunOutcome {
         RunOutcome(
@@ -391,7 +427,10 @@ public struct RunOutcome: Codable, Hashable, Sendable {
             processedCount: outcomes.reduce(0) { $0 + $1.processedCount },
             removedItemIDs: outcomes.flatMap(\.removedItemIDs),
             failures: outcomes.flatMap(\.failures),
-            summary: summary
+            summary: summary,
+            trashedBytes: outcomes.reduce(0) { $0 + $1.trashedBytes },
+            trashedCount: outcomes.reduce(0) { $0 + $1.trashedCount },
+            trashRunIDs: outcomes.flatMap(\.trashRunIDs)
         )
     }
 }

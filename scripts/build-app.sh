@@ -40,6 +40,28 @@ sed -e "s/__BUNDLE_ID__/$BUNDLE_ID/g" \
     Support/Info.plist > "$APP/Contents/Info.plist"
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 
+# Finder integration: spruce:// links, files dropped on the Dock icon, and the Services
+# menu ("Uninstall with Spruce", "Map Folder with Spruce", "Shred with Spruce" — handled
+# by SpruceServices / AppDelegate; they only show the files in a tool, never remove).
+# Keys the template already defines are left alone.
+PLIST="$APP/Contents/Info.plist"
+add_plist_key() {
+  if ! plutil -extract "$1" xml1 -o /dev/null "$PLIST" >/dev/null 2>&1; then
+    plutil -insert "$1" -json "$2" "$PLIST"
+  fi
+}
+add_plist_key CFBundleURLTypes '[{"CFBundleURLName":"Spruce link","CFBundleURLSchemes":["spruce"]}]'
+add_plist_key CFBundleDocumentTypes '[
+  {"CFBundleTypeName":"Application","CFBundleTypeRole":"Viewer","LSHandlerRank":"None","LSItemContentTypes":["com.apple.application-bundle"]},
+  {"CFBundleTypeName":"Installer Package","CFBundleTypeRole":"Viewer","LSHandlerRank":"None","LSItemContentTypes":["com.apple.installer-package-archive"]},
+  {"CFBundleTypeName":"Folder","CFBundleTypeRole":"Viewer","LSHandlerRank":"None","LSItemContentTypes":["public.folder"]},
+  {"CFBundleTypeName":"Item","CFBundleTypeRole":"Viewer","LSHandlerRank":"None","LSItemContentTypes":["public.item"]}]'
+add_plist_key NSServices '[
+  {"NSMenuItem":{"default":"Uninstall with Spruce"},"NSMessage":"uninstallWithSpruce","NSPortName":"Spruce","NSRequiredContext":{},"NSSendFileTypes":["com.apple.application-bundle"]},
+  {"NSMenuItem":{"default":"Map Folder with Spruce"},"NSMessage":"mapFolderWithSpruce","NSPortName":"Spruce","NSRequiredContext":{},"NSSendFileTypes":["public.folder"]},
+  {"NSMenuItem":{"default":"Shred with Spruce"},"NSMessage":"shredWithSpruce","NSPortName":"Spruce","NSRequiredContext":{},"NSSendFileTypes":["public.item"]}]'
+plutil -lint "$PLIST"
+
 # App icon: use Support/AppIcon.icns if present, otherwise render one.
 if [[ -f Support/AppIcon.icns ]]; then
   cp Support/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"

@@ -21,6 +21,7 @@ affiliated with MacPaw.
 | **Toolbox** | Every tool in one searchable hub with favourites, plus Shredder, Screen Cleaning mode, Empty Trash, Free Up RAM, Flush DNS. |
 | **Activity** | Health score with recommendations, monthly stats and charts, timeline, operations log. |
 | **Menu bar monitor** | Health, storage, memory, CPU, network, battery and connected devices, with alerts. |
+| **Mac integration** | Finder Services (Uninstall / Map Folder / Shred with Spruce), drops on the Dock icon, `spruce://open/<module>` links, Dock menu, full main menu with keyboard shortcuts and a local Help window. |
 
 ## Safety model
 
@@ -34,9 +35,14 @@ affiliated with MacPaw.
 * **Never modifies app bundles** (no language-file or universal-binary stripping, which
   breaks code signatures).
 * **No root daemon.** The few tasks that need administrator rights run as fixed,
-  audited commands behind a single macOS password prompt.
+  audited commands behind a single macOS password prompt. Root only acts in app,
+  vendor, cache, log and temp locations, re-checks each item by inode inside the
+  privileged script, and never changes file ownership; root-owned items go to a
+  separate "Spruce Admin Trash" folder in the Trash.
+* **Undo.** Items moved to the Trash are recorded, so a run can be put back while they
+  are still there; the in-app Notification Center (the bell) keeps alerts you missed.
 * **Ignore list** for paths, apps and individual items; **operations log** at
-  `~/Library/Logs/Spruce/operations.log`.
+  `~/Library/Logs/Spruce/operations.log` (rotated at 5 MB).
 * **No telemetry.** Network access is used only for update checks you start.
 
 ## Install on your Mac

@@ -5,6 +5,7 @@ import SwiftUI
 /// Main window: living canvas behind a frosted sidebar rail and the module content.
 struct RootView: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.openWindow) private var openWindow
     @State private var showOnboarding = false
 
     var body: some View {
@@ -21,6 +22,7 @@ struct RootView: View {
         }
         .animation(Motion.canvas, value: model.selection)
         .onAppear {
+            model.registerWindowOpener(openWindow)
             showOnboarding = !model.settings.settings.hasCompletedOnboarding
         }
         .sheet(isPresented: $showOnboarding) {
@@ -88,13 +90,16 @@ struct SidebarRail: View {
                 .buttonStyle(.plain)
                 .padding(.horizontal, Spacing.m)
             }
-            HStack {
+            SidebarHealthPill()
+                .padding(.horizontal, Spacing.xs)
+            HStack(spacing: Spacing.m) {
                 SettingsLink {
                     Image(systemName: "gearshape")
                         .foregroundStyle(Ink.secondary)
                 }
                 .buttonStyle(.plain)
                 .help("Settings")
+                SidebarInboxButton()
                 Spacer()
             }
             .padding(Spacing.m)
@@ -151,6 +156,85 @@ private struct SidebarCheckupBadge: View {
                 .frame(width: 14, height: 14)
                 .help("Checkup in progress")
                 .transition(.opacity)
+        }
+    }
+}
+
+/// Mac Health at the foot of the sidebar: the same score as Activity's gauge.
+private struct SidebarHealthPill: View {
+    @Environment(AppModel.self) private var model
+    @Environment(\.colorSchemeContrast) private var contrast
+
+    var body: some View {
+        let report = model.healthReport
+        let color = report.isRated ? Self.color(report.level) : PrismInk(contrast).tertiary
+        Button {
+            model.open(.activity)
+        } label: {
+            HStack(spacing: Spacing.s) {
+                Circle()
+                    .fill(color)
+                    .frame(width: 7, height: 7)
+                    .shadow(color: color.opacity(0.6), radius: report.isRated ? 3 : 0)
+                Text("Health")
+                    .font(SpruceFont.caption.weight(.medium))
+                    .foregroundStyle(Ink.secondary)
+                Text(report.isRated ? report.level.title : "Not rated yet")
+                    .font(SpruceFont.caption.weight(.semibold))
+                    .foregroundStyle(report.isRated ? Ink.primary : PrismInk(contrast).tertiary)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                if report.isRated {
+                    Text("\(report.score)")
+                        .font(SpruceFont.captionDigits)
+                        .foregroundStyle(PrismInk(contrast).tertiary)
+                }
+            }
+            .padding(.horizontal, Spacing.m)
+            .padding(.vertical, 7)
+            .background(Ink.subtleFill, in: RoundedRectangle(cornerRadius: Radius.control, style: .continuous))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(report.isRated ? "Mac Health \(report.score) · \(report.level.blurb)" : "Mac Health is rated after the first measurements")
+        .accessibilityLabel(report.isRated ? "Mac Health \(report.level.title), \(report.score)" : "Mac Health not rated yet")
+    }
+
+    static func color(_ level: ActivityHealthLevel) -> Color {
+        switch level {
+        case .excellent, .good: return StatusColor.success
+        case .fair, .requiresAttention: return StatusColor.warning
+        case .critical: return StatusColor.danger
+        }
+    }
+}
+
+/// The bell: opens the in-app Notification Center. A dot (no count) marks unread items.
+private struct SidebarInboxButton: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        Button {
+            model.showsInbox.toggle()
+        } label: {
+            Image(systemName: "bell")
+                .foregroundStyle(Ink.secondary)
+                .overlay(alignment: .topTrailing) {
+                    if model.inbox.hasUnread {
+                        Circle()
+                            .fill(StatusColor.info)
+                            .frame(width: 6, height: 6)
+                            .offset(x: 2, y: -2)
+                    }
+                }
+        }
+        .buttonStyle(.plain)
+        .help("Notifications")
+        .accessibilityLabel(model.inbox.hasUnread ? "Notifications, unread" : "Notifications")
+        .popover(isPresented: Binding(get: { model.showsInbox }, set: { model.showsInbox = $0 }),
+                 arrowEdge: .trailing) {
+            InboxView()
+                .environment(model)
         }
     }
 }

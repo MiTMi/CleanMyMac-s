@@ -88,29 +88,62 @@ public enum Permissions {
 /// Posts local user notifications (low disk, threats, updates…).
 ///
 /// Pass `module` (a `ModuleID` raw value) and optionally `tool` (a tool id) to give the
-/// notification a "Review" button; clicking the notification or the button posts
-/// `Notifier.openRequest` with those values so the app can navigate there.
+/// notification a "Review" button; clicking the notification or the button opens that
+/// module/tool (the AppDelegate routes it, brings the main window back if it was
+/// closed, and also posts `Notifier.openRequest` with those values).
+///
+/// Every alert is also kept in the in-app Notification Center (`InboxStore`), and the
+/// sound follows Settings › Play sounds.
 public enum Notifier {
     public static let reviewCategory = "app.spruce.review"
     public static let reviewAction = "app.spruce.review.open"
     /// Posted on the main thread with userInfo ["module": String, "tool": String?].
     public static let openRequest = Notification.Name("app.spruce.notifier.openRequest")
+    /// userInfo key carrying the `InboxItem.Kind` raw value.
+    public static let kindKey = "kind"
 
-    public static func post(id: String, title: String, body: String, module: String? = nil, tool: String? = nil) {
+    public static func post(id: String, title: String, body: String, module: String? = nil, tool: String? = nil,
+                            kind: InboxItem.Kind = .alert) {
+        InboxStore.shared.add(InboxItem(id: id, kind: kind, title: title, body: body, module: module, tool: tool))
         guard Bundle.main.bundleIdentifier != nil else { return }
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body
-        content.sound = .default
+        content.sound = playsSounds ? .default : nil
+        var info: [String: String] = [kindKey: kind.rawValue]
         if let module {
-            var info: [String: String] = ["module": module]
+            info["module"] = module
             if let tool { info["tool"] = tool }
-            content.userInfo = info
             content.categoryIdentifier = reviewCategory
         }
+        content.userInfo = info
         let request = UNNotificationRequest(identifier: id, content: content, trigger: nil)
         UNUserNotificationCenter.current().add(request)
     }
+
+    /// Keeps a message in the in-app Notification Center only (no banner).
+    public static func keep(id: String = UUID().uuidString, kind: InboxItem.Kind, title: String, body: String,
+                            module: String? = nil, tool: String? = nil) {
+        InboxStore.shared.add(InboxItem(id: id, kind: kind, title: title, body: body, module: module, tool: tool))
+    }
+
+    /// Mirrors a delivered system notification (e.g. the scheduled weekly reminder) into
+    /// the in-app Notification Center, once.
+    public static func mirror(_ notification: UNNotification) {
+        let content = notification.request.content
+        let info = content.userInfo
+        let id = notification.request.identifier
+        let kind = (info[kindKey] as? String).flatMap(InboxItem.Kind.init(rawValue:))
+            ?? (notification.request.trigger is UNCalendarNotificationTrigger ? .reminder : .alert)
+        // Repeating reminders reuse one identifier; keep one entry per delivery.
+        let itemID = kind == .reminder ? "\(id).\(Int(notification.date.timeIntervalSince1970))" : id
+        InboxStore.shared.addIfMissing(InboxItem(id: itemID, kind: kind, date: notification.date, title: content.title,
+                                                 body: content.body, module: info["module"] as? String,
+                                                 tool: info["tool"] as? String))
+    }
+
+    /// Settings › Play sounds.
+    public static var playsSounds: Bool { SettingsStore.shared.settings.playSounds }
 
     /// Registers the "Review" action. Call once at launch.
     public static func registerCategories() {

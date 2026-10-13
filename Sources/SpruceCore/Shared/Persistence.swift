@@ -16,11 +16,17 @@ public enum SprucePaths {
     public static var operationsLog: URL { logs.appendingPathComponent("operations.log") }
 }
 
-/// Reads and writes a Codable value as pretty-printed JSON, atomically.
-public struct JSONFileStore<Value: Codable> {
+/// Reads and writes a Codable value as JSON, atomically (pretty-printed by default).
+public struct JSONFileStore<Value: Codable>: Sendable {
     public let url: URL
+    /// Human-readable output (indented, sorted keys). Large, frequently written files
+    /// such as the activity history turn this off.
+    public let prettyPrinted: Bool
 
-    public init(url: URL) { self.url = url }
+    public init(url: URL, prettyPrinted: Bool = true) {
+        self.url = url
+        self.prettyPrinted = prettyPrinted
+    }
 
     public func load() -> Value? {
         guard let data = try? Data(contentsOf: url) else { return nil }
@@ -32,7 +38,7 @@ public struct JSONFileStore<Value: Codable> {
     public func save(_ value: Value) throws {
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.outputFormatting = prettyPrinted ? [.prettyPrinted, .sortedKeys] : []
         encoder.dateEncodingStrategy = .iso8601
         let data = try encoder.encode(value)
         try data.write(to: url, options: .atomic)
@@ -42,43 +48,134 @@ public struct JSONFileStore<Value: Codable> {
 /// Append-only, human-readable log of every destructive operation the app performs.
 ///
 /// Format (tab separated): ISO-8601 date, module, action, result, bytes, path/detail.
+/// The file is rotated at `rotationSize` (the previous file is kept as `operations.1.log`).
 public final class OperationLog: @unchecked Sendable {
     public static let shared = OperationLog(url: SprucePaths.operationsLog)
 
     public let url: URL
+    /// Size at which the log is rotated.
+    public let rotationSize: UInt64
     private let lock = NSLock()
+    private var handle: FileHandle?
+    private var handleInode: UInt64?
+    private let formatter: ISO8601DateFormatter = ISO8601DateFormatter()
 
-    public init(url: URL) { self.url = url }
+    public init(url: URL, rotationSize: UInt64 = 5_000_000) {
+        self.url = url
+        self.rotationSize = rotationSize
+    }
+
+    deinit {
+        try? handle?.close()
+    }
+
+    /// The previous log after a rotation (`operations.1.log`).
+    public var rotatedURL: URL {
+        let base = url.deletingPathExtension().lastPathComponent
+        let ext = url.pathExtension.isEmpty ? "log" : url.pathExtension
+        return url.deletingLastPathComponent().appendingPathComponent("\(base).1.\(ext)")
+    }
 
     public func record(module: ModuleID, action: String, result: String, bytes: Int64 = 0, detail: String) {
+        lock.lock()
+        defer { lock.unlock() }
         let line = [
-            ISO8601DateFormatter().string(from: Date()),
+            formatter.string(from: Date()),
             module.rawValue,
             action,
             result,
             String(bytes),
             detail.replacingOccurrences(of: "\n", with: " ").replacingOccurrences(of: "\t", with: " "),
         ].joined(separator: "\t") + "\n"
-        lock.lock()
-        defer { lock.unlock() }
         do {
-            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-            if let handle = try? FileHandle(forWritingTo: url) {
-                defer { try? handle.close() }
-                _ = try? handle.seekToEnd()
-                try handle.write(contentsOf: Data(line.utf8))
-            } else {
-                try Data(line.utf8).write(to: url)
+            let file = try openHandle()
+            let end = try file.seekToEnd()
+            try file.write(contentsOf: Data(line.utf8))
+            if end + UInt64(line.utf8.count) >= rotationSize {
+                rotate()
             }
         } catch {
-            // Logging must never break a cleanup run.
+            // Logging must never break a cleanup run. Try a fresh handle next time.
+            try? handle?.close()
+            handle = nil
+            handleInode = nil
         }
     }
 
-    /// Most recent lines (newest last).
+    /// Most recent lines (newest last). Reads backwards from the end of the file, so it
+    /// stays cheap however large the log grows; falls back to the rotated file when the
+    /// current one holds fewer lines.
     public func tail(_ count: Int = 200) -> [String] {
-        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return [] }
-        return Array(text.split(separator: "\n").suffix(count).map(String.init))
+        guard count > 0 else { return [] }
+        lock.lock()
+        defer { lock.unlock() }
+        var lines = Self.lastLines(of: url, count: count)
+        if lines.count < count {
+            lines = Self.lastLines(of: rotatedURL, count: count - lines.count) + lines
+        }
+        return lines
+    }
+
+    // MARK: Private (call with the lock held)
+
+    private func openHandle() throws -> FileHandle {
+        // Reopen when the file was removed or replaced behind our back (deleted in Finder,
+        // saved by an editor…): the cached handle would write to the old, unlinked file.
+        let inode = currentInode()
+        if let handle, inode != nil, inode == handleInode { return handle }
+        try? handle?.close()
+        handle = nil
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if inode == nil {
+            _ = FileManager.default.createFile(atPath: url.path, contents: nil)
+        }
+        let opened = try FileHandle(forWritingTo: url)
+        handle = opened
+        handleInode = currentInode()
+        return opened
+    }
+
+    private func currentInode() -> UInt64? {
+        let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
+        return (attributes?[.systemFileNumber] as? NSNumber)?.uint64Value
+    }
+
+    private func rotate() {
+        try? handle?.close()
+        handle = nil
+        handleInode = nil
+        let fm = FileManager.default
+        try? fm.removeItem(at: rotatedURL)
+        try? fm.moveItem(at: url, to: rotatedURL)
+    }
+
+    static func lastLines(of url: URL, count: Int) -> [String] {
+        guard count > 0, let file = try? FileHandle(forReadingFrom: url) else { return [] }
+        defer { try? file.close() }
+        guard let size = try? file.seekToEnd(), size > 0 else { return [] }
+        let chunk: UInt64 = 64 * 1024
+        var offset = size
+        var buffer = Data()
+        var newlines = 0
+        // Read until we hold more newlines than lines wanted (the first line may be partial).
+        while offset > 0 && newlines <= count {
+            let length = min(chunk, offset)
+            offset -= length
+            do {
+                try file.seek(toOffset: offset)
+                guard let data = try file.read(upToCount: Int(length)), !data.isEmpty else { break }
+                newlines += data.reduce(0) { $1 == 0x0A ? $0 + 1 : $0 }
+                buffer = data + buffer
+            } catch {
+                break
+            }
+        }
+        var lines = String(decoding: buffer, as: UTF8.self).split(separator: "\n", omittingEmptySubsequences: true)
+        if offset > 0, !lines.isEmpty {
+            // The first line was cut by the chunk boundary.
+            lines.removeFirst()
+        }
+        return lines.suffix(count).map(String.init)
     }
 }
 
