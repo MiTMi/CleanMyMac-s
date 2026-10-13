@@ -213,6 +213,12 @@ public struct SpruceSettings: Codable, Equatable, Sendable {
     // Protection
     public var realtimeProtection: Bool = true
     public var scanDepth: String = "balanced"   // "quick" | "balanced" | "deep"
+    /// Download Spruce's threat list (feed.json + rules.yara from the project's GitHub
+    /// repository) at most once a day. Off: no downloads, and only built-in data is used.
+    public var threatFeedEnabled: Bool = true
+    /// After a scan, look up heuristic and rule-based findings on VirusTotal (SHA-256 only)
+    /// when an API key is saved. The key itself lives only in the Keychain, never here.
+    public var virusTotalAutoCheck: Bool = true
 
     // Monitor & notifications
     public var notifyLowDisk: Bool = true
@@ -250,6 +256,8 @@ public struct SpruceSettings: Codable, Equatable, Sendable {
         ignoredItemIDs = v(.ignoredItemIDs, ignoredItemIDs)
         realtimeProtection = v(.realtimeProtection, realtimeProtection)
         scanDepth = v(.scanDepth, scanDepth)
+        threatFeedEnabled = v(.threatFeedEnabled, threatFeedEnabled)
+        virusTotalAutoCheck = v(.virusTotalAutoCheck, virusTotalAutoCheck)
         notifyLowDisk = v(.notifyLowDisk, notifyLowDisk)
         lowDiskThresholdPercent = v(.lowDiskThresholdPercent, lowDiskThresholdPercent)
         notifyHighMemory = v(.notifyHighMemory, notifyHighMemory)

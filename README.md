@@ -12,7 +12,7 @@ affiliated with MacPaw.
 |---|---|
 | **Checkup** | One scan across Cleanup, Protection, Performance, Applications and Clutter; a tile per area, review sheets, one Run button. |
 | **Cleanup** | User/system caches and logs, temp files, Xcode and developer junk, iOS backups and updates, broken preferences and login items, Mail attachment copies, Trash bins. |
-| **Protection** | Malware & persistence scan (quick/balanced/deep) with signature and hash checks, real-time watch of launch agents/daemons, browser & macOS privacy traces, app permissions review/reset. |
+| **Protection** | Malware & persistence scan (quick/balanced/deep) with signature and hash checks, Apple's XProtect rules (run offline by a built-in YARA engine), a daily-updated threat list from this repository and optional VirusTotal hash lookups with your own API key; real-time watch of launch agents/daemons, browser & macOS privacy traces, app permissions review/reset. |
 | **Performance** | Maintenance tasks (free RAM, purgeable space, DNS, Spotlight, Mail, fonts…) behind one admin prompt, login & background items with reversible on/off, heavy consumers. |
 | **Applications** | Full uninstaller with Reset, leftovers of removed apps, old installers, updater (Sparkle, App Store, Homebrew), extensions manager. |
 | **Clutter** | Large & old files, duplicates (with smart selection), similar images, Downloads review. |
@@ -49,8 +49,15 @@ affiliated with MacPaw.
 * **Ignore list** for paths, apps and individual items; **operations log** at
   `~/Library/Logs/Spruce/operations.log` (rotated at 5 MB).
 * **No telemetry.** Network access is used only for app update checks (when you open the
-  Updater; while update alerts are on, also in Checkup and once a day in the background)
-  and for downloading an update you choose to install.
+  Updater; while update alerts are on, also in Checkup and once a day in the background),
+  for downloading an update you choose to install, for Protection's threat list (at most
+  once a day from this project's GitHub repository; turn it off in Settings › Protection)
+  and for VirusTotal lookups once you add your own API key (opt-in).
+* **VirusTotal sees fingerprints, not files.** Only a file's SHA-256 is sent, never the
+  file. Your API key is stored in the macOS Keychain and nowhere else; Spruce keeps to the
+  free key's limits (4 lookups a minute, 500 a day).
+* **Apple's XProtect rules stay on your Mac.** Spruce reads the rules macOS keeps up to
+  date and checks files against them offline.
 
 ## Install on your Mac
 

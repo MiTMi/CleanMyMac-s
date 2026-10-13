@@ -163,7 +163,9 @@ follows the safety rules below.
   run (bytes live on the per-module entries with the same date — don't count it twice);
   `.startupItems` = login/background items turned off or removed.
 * **Settings fields to expose:** `SpruceSettings.notifyHighCPU` (Notifications tab; the
-  menu bar bell toggles the same value). Protection scan depth: show
+  menu bar bell toggles the same value). Protection tab: `threatFeedEnabled` (Download threat
+  list, with Check Now → `ProtectionEngine.checkThreatListNow()`), the VirusTotal key
+  (Keychain, through the engine — never a settings field) and `virusTotalAutoCheck`. Protection scan depth: show
   `ProtectionScanDepth.allCases` with `.title`, `.coverage`, `.speed`, `.purpose` (stored as
   "quick" / "balanced" / "deep" in `SpruceSettings.scanDepth`).
 * **Onboarding** must call `Permissions.requestNotificationAuthorization()` (monitor and
@@ -211,6 +213,42 @@ follows the safety rules below.
   items locked in Finder or by macOS, and items the user can't move themselves (root-owned,
   unwritable folder, sticky folder) outside `PathGuard.isInPrivilegedZone`, where
   `FileRemover` would refuse to escalate anyway.
+* **Protection detection sources** (`ProtectionEngine.detection`, observable, main thread):
+  the malware scan and real-time protection run on top of the built-in catalog:
+  * **Apple's XProtect rules** — `XProtect.yara` from
+    `/private/var/protected/xprotect/XProtect.bundle/Contents/Resources/` (macOS 15+, preferred)
+    or `/Library/Apple/System/Library/CoreServices/XProtect.bundle/Contents/Resources/`, run by
+    Spruce's own YARA engine (`YaraRuleSet` in `SpruceCore/Protection/Yara*.swift`, no
+    third-party code). Rules using syntax the engine doesn't support (regex and base64 strings,
+    the pe/macho/math modules, `entrypoint`…) are skipped one by one with a reason, together
+    with the rules that refer to them; matching is capped so a rule can't hang a scan.
+    `ProtectionAppleRulesLoader` compiles the file once per size + date + inode; rules that
+    match harmless sample files are switched off (`ProtectionRuleSource`). Matches on
+    Apple-signed files are ignored. Status: `detection.appleRules` (`ProtectionAppleRulesStatus`:
+    path, XProtect version, active and skipped rule counts, or why it's unavailable).
+  * **Threat list** — `ThreatFeed/feed.json` (families and indicators in the catalog's own
+    kinds, strictly validated: over-broad paths, names, team IDs or hashes are refused) and
+    `ThreatFeed/rules.yara`, downloaded by `ProtectionThreatFeedUpdater` (HTTPS only, 20 s,
+    ≤ 5 MB / 2 MB, ETag requests) into `~/Library/Application Support/Spruce/ThreatFeed/`
+    (`ProtectionThreatFeedCache`, atomic writes, damaged copies ignored, never an older
+    version). It can only add detections: built-in families and indicators win, downloaded
+    indicators never flag Apple-signed files. Checked at most once a day before a scan (the
+    scan waits ≤ 2.5 s, then goes on with the cached copy) and by
+    `ProtectionEngine.checkThreatListNow()`; a failed check keeps the cached or built-in data.
+    `SpruceSettings.threatFeedEnabled` (default on) turns downloads and the cached copy off.
+  * **VirusTotal** — the user's own API key lives only in the Keychain (generic password,
+    service `app.spruce.virustotal`, account `api-key`; never in settings, defaults, logs or
+    the repo). `ProtectionVirusTotalClient` sends `GET /api/v3/files/{sha256}` only, enforces
+    the public limits (4 a minute, 500 a day, counted in user defaults; a 429 pauses lookups)
+    and remembers answers per hash for a week (a day for unknown files). After a scan, while
+    `SpruceSettings.virusTotalAutoCheck` is on (default) and a key is saved, up to 40
+    heuristic and rule-based findings with a program file are looked up in the background;
+    answers land on the engine's reports and Checkup rows, in `detection` and as
+    `ProtectionEngine.virusTotalNotification`. They add a reason line and raise a flagged
+    file to High severity but never change what is selected. UI APIs: `saveVirusTotalKey`
+    (validates with the EICAR test file's hash), `removeVirusTotalKey`,
+    `validateVirusTotalKey`, `checkWithVirusTotal(_:)`, `cachedVirusTotalVerdict(for:)`,
+    `virusTotalPage(for:)`; row helpers `ScanItem.applyVirusTotal`, `[ScanGroup].applyVirusTotal`.
 * **Links:** `spruce://open/<module>[?tool=<tool id>]`, `spruce://checkup[?autostart=1]`,
   `spruce://inbox` (navigation only; tool ids must belong to the module). The Dock menu
   offers Run Checkup, Empty Trash…, Free Up Memory… (they open the tool, which confirms)
@@ -246,9 +284,17 @@ follows the safety rules below.
 8. **No telemetry, no network calls** except: update checks (Sparkle appcasts, iTunes
    lookup API, Homebrew API) when the user opens Updater; while Settings › Notifications ›
    App updates is on, also when Checkup scans Applications and in a daily background check
-   (`NSBackgroundActivityScheduler`); and downloading a Sparkle update archive
+   (`NSBackgroundActivityScheduler`); downloading a Sparkle update archive
    (HTTPS, EdDSA-verified) when the user presses Update or runs selected updates from
-   Checkup. Nothing about the Mac or its files is ever sent.
+   Checkup; Protection's threat list (`ThreatFeed/feed.json` and `rules.yara` from this
+   project's GitHub repository, HTTPS, at most once a day before a malware scan or when the
+   user presses Check Now, while Settings › Protection › Download threat list is on — on by
+   default); and VirusTotal file lookups, only after the user saved their own API key
+   (Keychain only): automatic after a scan for heuristic and rule-based findings while
+   Settings › Protection › Check findings automatically is on, and when the user presses
+   Check with VirusTotal. A lookup sends a file's **SHA-256 only** — files are never
+   uploaded. Apple's XProtect rules are read from macOS and need no network. Nothing else
+   about the Mac or its files is ever sent.
 9. Record every destructive action (FileRemover does this) and every run in history.
 
 ## Coding conventions

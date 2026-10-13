@@ -15,6 +15,15 @@ import SpruceCore
 /// are cleared, permissions are reset — routed by the item's `protection.tool` metadata.
 /// The Privacy and App Permissions tools have their own scanners (`privacy`,
 /// `permissions`) so each tool can run its own scan → review → act journey.
+///
+/// Detection beyond the built-in catalog (`detection` holds what the screens show):
+/// * Apple's XProtect rules, read from macOS and run by the built-in YARA engine (offline).
+/// * Spruce's threat list (feed.json + rules.yara from the project's GitHub repository),
+///   checked at most once a day before a scan or with `checkThreatListNow()`, while
+///   Settings › Protection › Download threat list is on. It can only add detections.
+/// * VirusTotal lookups with the user's own key (Keychain): after a scan for heuristic and
+///   rule-based findings (Settings › Protection, on by default once a key is saved) and with
+///   `checkWithVirusTotal(_:)`. Only SHA-256 hashes are sent; files are never uploaded.
 public final class ProtectionEngine: CheckupContributor, GroupScanner, @unchecked Sendable {
     /// Threats found by the last Checkup scan. Written by background scans and read and
     /// edited by the Checkup screen, so it lives behind the engine's lock.
@@ -26,6 +35,13 @@ public final class ProtectionEngine: CheckupContributor, GroupScanner, @unchecke
 
     /// Posted on the main thread after an automatic (background) scan finished.
     public static let automaticScanNotification = Notification.Name("SpruceProtectionAutomaticScan")
+    /// Posted on the main thread when a VirusTotal answer arrives for a malware row:
+    /// `userInfo[virusTotalItemKey]` is the row id (`ScanItem.id`), `userInfo[virusTotalVerdictKey]`
+    /// the `VirusTotalVerdict`. The engine's own results (`lastMalwareReport`, `checkupReview`)
+    /// already carry it; review lists the UI keeps apply it with `[ScanGroup].applyVirusTotal(_:)`.
+    public static let virusTotalNotification = Notification.Name("SpruceProtectionVirusTotalVerdict")
+    public static let virusTotalItemKey = "itemID"
+    public static let virusTotalVerdictKey = "verdict"
 
     /// Browser and macOS privacy traces.
     public let privacy: ProtectionPrivacyCleaner
@@ -33,21 +49,37 @@ public final class ProtectionEngine: CheckupContributor, GroupScanner, @unchecke
     public let permissions: ProtectionPermissionsReviewer
     /// Watches startup-item folders while real-time protection is on.
     public let realtime: ProtectionRealtimeMonitor
+    /// Apple's XProtect rules, the threat list and VirusTotal lookups, as the Protection
+    /// screens and Settings show them (observable; changes on the main thread).
+    public let detection = ProtectionDetectionState()
 
     let probe = ProtectionMacSystemProbe()
-    private let state = ProtectionLocked(ProtectionEngineState())
+    /// XProtect rules and the cached threat list the scanners are built with.
+    let library = ProtectionDetectionLibrary()
+    let feedUpdater: ProtectionThreatFeedUpdater
+    let virusTotal = ProtectionVirusTotalClient()
+    let state = ProtectionLocked(ProtectionEngineState())
     private let background = ProtectionBackgroundScanner()
+    /// The automatic VirusTotal lookups of the last scan (cancelled by the next scan).
+    let automaticLookups = ProtectionLocked<Task<Void, Never>?>(nil)
+
+    /// Files bigger than this aren't fingerprinted for VirusTotal (like the scanner's hashing).
+    static let maxFingerprintBytes: Int64 = 100_000_000
 
     public init() {
         privacy = ProtectionPrivacyCleaner()
         permissions = ProtectionPermissionsReviewer()
-        realtime = ProtectionRealtimeMonitor(probe: probe)
-        // Real-time protection follows Settings › Protection for the app's whole lifetime,
-        // and automatic scans run on the schedule chosen on the Protection hub.
+        realtime = ProtectionRealtimeMonitor(probe: probe, library: library)
+        feedUpdater = ProtectionThreatFeedUpdater(library: library)
+        // Real-time protection and the threat list follow Settings › Protection for the app's
+        // whole lifetime, and automatic scans run on the schedule chosen on the Protection hub.
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.followRealtimeSetting()
+            self.followDetectionSettings()
             self.background.start(engine: self)
+            let engine = self
+            Task.detached(priority: .utility) { await engine.publishVirusTotalState() }
         }
     }
 
@@ -95,13 +127,19 @@ public final class ProtectionEngine: CheckupContributor, GroupScanner, @unchecke
     func scanMalware(depth: ProtectionScanDepth, automatic: Bool,
                      progress: @escaping ProgressHandler) async throws -> ProtectionMalwareReport {
         progress(ScanProgress(fraction: 0, message: "Preparing a \(depth.title.lowercased()) scan…"))
+        let before = await ProtectionMac.settings()
+        library.isThreatListEnabled = before.threatFeedEnabled
+        // The lookups of the previous scan's findings stop; this scan queues its own.
+        cancelAutomaticLookups()
+        await refreshThreatListIfDue()
         let crontab = await Self.readCrontab()
-        let scanner = makeScanner(crontab: crontab)
-        let raw = try await ProtectionMac.runBlocking(qos: automatic ? .utility : .userInitiated) { flag in
-            try scanner.scan(depth: depth, progress: progress, isCancelled: { flag.isCancelled })
+        let raw = try await ProtectionMac.runBlocking(qos: automatic ? .utility : .userInitiated) { [self] flag in
+            // Built here, off the main thread: the first scan compiles Apple's XProtect rules.
+            let scanner = self.makeScanner(crontab: crontab)
+            return try scanner.scan(depth: depth, progress: progress, isCancelled: { flag.isCancelled })
         }
         let settings = await ProtectionMac.settings()
-        let report = raw.excludingIgnored(settings)
+        let report = await withRememberedVirusTotalAnswers(raw.excludingIgnored(settings))
         state.update {
             $0.malwareReport = report
             if automatic { $0.automaticReport = report }
@@ -111,6 +149,7 @@ public final class ProtectionEngine: CheckupContributor, GroupScanner, @unchecke
             ? "\(kind) malware scan: no threats"
             : "\(kind) malware scan: \(CountFormat.items(report.threatCount, singular: "threat"))"
         await ProtectionMac.record(ActivityEntry(module: .protection, kind: .malwareScan, count: report.threatCount, summary: summary))
+        if settings.virusTotalAutoCheck { startAutomaticLookups(for: report) }
         return report
     }
 
@@ -205,8 +244,12 @@ public final class ProtectionEngine: CheckupContributor, GroupScanner, @unchecke
 
     // MARK: Helpers
 
+    /// A scanner with the built-in catalog merged with the threat list (while it's on), and
+    /// Apple's XProtect rules plus the threat list's rules. Call off the main thread.
     func makeScanner(crontab: String?) -> ProtectionMalwareScanner {
-        ProtectionMalwareScanner(space: ProtectionPathSpace(home: NSHomeDirectory()), probe: probe, crontab: crontab)
+        let inputs = library.scannerInputs()
+        return ProtectionMalwareScanner(space: ProtectionPathSpace(home: NSHomeDirectory()), catalog: inputs.catalog,
+                                        probe: probe, crontab: crontab, ruleSources: inputs.ruleSources)
     }
 
     /// The user's crontab, or nil when there is none.

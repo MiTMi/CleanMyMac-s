@@ -7,6 +7,9 @@ import SpruceCore
 /// own). Each new item is evaluated with the malware scanner, so known threats and
 /// suspicious items get a stronger alert. Newly installed apps in /Applications and
 /// ~/Applications are checked against the threat catalog too; only flagged apps alert.
+/// The scanner uses the same detection data as malware scans (`ProtectionDetectionLibrary`:
+/// the catalog merged with the threat list while it's on, Apple's XProtect rules and the
+/// threat list's rules).
 ///
 /// Folder changes arrive through `DispatchSource` file-system sources (one per folder);
 /// a one-minute timer re-checks everything as a fallback and picks up folders that are
@@ -25,6 +28,7 @@ public final class ProtectionRealtimeMonitor: @unchecked Sendable {
     }
 
     private let probe: ProtectionMacSystemProbe
+    private let library: ProtectionDetectionLibrary
     private let queue = DispatchQueue(label: "app.spruce.protection.realtime", qos: .utility)
     private let lock = NSLock()
 
@@ -41,8 +45,9 @@ public final class ProtectionRealtimeMonitor: @unchecked Sendable {
     private var runningFlag = false
     private var events: [ProtectionRealtimeEvent] = []
 
-    init(probe: ProtectionMacSystemProbe) {
+    init(probe: ProtectionMacSystemProbe, library: ProtectionDetectionLibrary) {
         self.probe = probe
+        self.library = library
     }
 
     /// True while the folders are being watched.
@@ -167,7 +172,9 @@ public final class ProtectionRealtimeMonitor: @unchecked Sendable {
         }
         guard !added.isEmpty || !addedApps.isEmpty else { return }
         let home = NSHomeDirectory()
-        let scanner = ProtectionMalwareScanner(space: ProtectionPathSpace(home: home), probe: probe)
+        let inputs = library.scannerInputs()
+        let scanner = ProtectionMalwareScanner(space: ProtectionPathSpace(home: home), catalog: inputs.catalog, probe: probe,
+                                               ruleSources: inputs.ruleSources)
         let threshold = ProtectionScanDepth.balanced.heuristicThreshold
         var newEvents = added.map { folder, path -> ProtectionRealtimeEvent in
             let item = ProtectionLaunchItem.parse(path: path, domain: folder.domain, kind: folder.kind, home: home)
