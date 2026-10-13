@@ -8,7 +8,8 @@ import SpruceCore
 /// per-user Darwin folders, mounted drives, Mail accounts, permissions.
 enum CleanupSystemProbe {
 
-    static func makeContext(purpose: CleanupScanPurpose, includeMailAccounts: Bool = true) async -> CleanupContext {
+    static func makeContext(purpose: CleanupScanPurpose, includeMailAccounts: Bool = true,
+                            includeSimulatorRuntimes: Bool = true) async -> CleanupContext {
         let running = await runningBundleIDs()
         let quittable = await quittableBundleIDs()
         let processes = await runningProcessNames()
@@ -36,7 +37,9 @@ enum CleanupSystemProbe {
             mailAccounts: mail,
             appName: { CleanupAppNames.shared.name(for: $0) },
             now: Date(),
-            purpose: purpose
+            purpose: purpose,
+            // Checkup never offers them (they are never pre-selected), so it skips the lookup.
+            simulatorRuntimes: includeSimulatorRuntimes && purpose == .module ? await simulatorRuntimes() : []
         )
     }
 
@@ -51,6 +54,27 @@ enum CleanupSystemProbe {
     /// Bundle identifiers of `CleanupRunningApps.quittable()`.
     static func quittableBundleIDs() async -> Set<String> {
         await MainActor.run { Set(CleanupRunningApps.quittable().compactMap(\.bundleIdentifier)) }
+    }
+
+    /// Simulator runtimes Xcode manages (`simctl runtime list -j`), or [] without Xcode.
+    static func simulatorRuntimes() async -> [CleanupSimulatorRuntime] {
+        guard let simctl = await simctlPath() else { return [] }
+        let result = await Shell.run(simctl, ["runtime", "list", "-j"], timeout: 20)
+        guard result.status == 0 else { return [] }
+        return CleanupSimulatorRuntimes.parse(Data(result.stdout.utf8))
+    }
+
+    /// Xcode's simctl, run directly from the active developer folder: never through the
+    /// `xcrun` shim, which offers to install the command line tools on a Mac without them.
+    static func simctlPath() async -> String? {
+        var candidates: [String] = []
+        let selected = await Shell.run("/usr/bin/xcode-select", ["-p"], timeout: 5)
+        if selected.status == 0 {
+            let folder = selected.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+            if folder.hasPrefix("/") { candidates.append(folder + "/usr/bin/simctl") }
+        }
+        candidates.append("/Applications/Xcode.app/Contents/Developer/usr/bin/simctl")
+        return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
     }
 
     /// Executable names of all processes (Xcode build tools and simulators have no

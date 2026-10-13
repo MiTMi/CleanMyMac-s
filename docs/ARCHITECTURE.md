@@ -267,11 +267,17 @@ follows the safety rules below.
 
 1. **All deletions go through `FileRemover.dispose`**, which re-checks every path with
    `PathGuard` right before acting. Never call `FileManager.removeItem`/`trashItem` on
-   scan results directly.
+   scan results directly. One exception: Xcode simulator runtimes (Cleanup › Xcode Junk ›
+   Simulator Runtimes) are disk images macOS manages, so `CleanupScanner.expand` refuses
+   them and `CleanupEngine.clean` asks Xcode's own tool to remove them
+   (`simctl runtime delete <UUID>`, run from `xcode-select -p`, never through `xcrun`;
+   identifiers are checked with `CleanupSimulatorRuntimes.isValidIdentifier`). They are
+   listed only for Cleanup itself (not Checkup), unchecked, and blocked while a simulator runs.
 2. **Default to Trash.** `DeletionMethod.remove` is only for regenerable data inside
    PathGuard's permanent zones (caches, logs, temp, trash contents, build products).
 3. **Pre-select only `safe` items.** `review` items are shown unchecked (exception:
-   duplicate "smart selection" may pre-select the redundant copies). `risky` items are
+   duplicate "smart selection" may pre-select the redundant copies). Like CleanMyMac,
+   Xcode Device Support is `review` (Xcode takes a while to copy the symbols again). `risky` items are
    never pre-selected and need explicit confirmation.
 4. **Never modify app bundles** (no language-file stripping, no `lipo` thinning) — it
    breaks code signatures. Show such savings as informational at most.

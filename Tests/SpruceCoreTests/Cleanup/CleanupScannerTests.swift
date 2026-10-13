@@ -188,7 +188,7 @@ final class CleanupScannerTests: XCTestCase {
 
     // MARK: Xcode
 
-    func testDeviceSupportKeepsTheNewestVersionUnselected() throws {
+    func testDeviceSupportIsListedUnselected() throws {
         fx.file("Library/Developer/Xcode/iOS DeviceSupport/16.4 (20E247)/Symbols/a", age: 30 * day)
         fx.file("Library/Developer/Xcode/iOS DeviceSupport/iPhone15,2 17.5.1 (21F90)/Symbols/a", age: 40 * day)
         fx.ageFolders(fx.home + "/Library/Developer/Xcode/iOS DeviceSupport/16.4 (20E247)/Symbols", age: 30 * day)
@@ -197,7 +197,10 @@ final class CleanupScannerTests: XCTestCase {
         let (_, report) = fx.scan(fx.context(), sections: [.systemJunk])
         let old = try XCTUnwrap(report.item(endingWith: "16.4 (20E247)"))
         let newest = try XCTUnwrap(report.item(endingWith: "17.5.1 (21F90)"))
-        XCTAssertTrue(old.isSelected)
+        // Like CleanMyMac, Device Support is listed for review and never ticked for you:
+        // Xcode takes a while to copy the symbols again when such a device is connected.
+        XCTAssertFalse(old.isSelected)
+        XCTAssertEqual(old.safety, .review)
         XCTAssertFalse(newest.isSelected)
         XCTAssertEqual(newest.safety, .review)
     }

@@ -213,16 +213,23 @@ public final class CleanupEngine: CheckupContributor, GroupScanner, @unchecked S
         }
         progress(ScanProgress(fraction: nil, message: "Checking what's safe to remove…"))
         let settings = await MainActor.run { SettingsStore.shared.settings }
-        let context = await CleanupSystemProbe.makeContext(purpose: .module, includeMailAccounts: false)
+        let context = await CleanupSystemProbe.makeContext(purpose: .module, includeMailAccounts: false,
+                                                           includeSimulatorRuntimes: false)
         let scanner = CleanupScanner(context: context, settings: settings)
 
         var failures: [ItemFailure] = []
         var removedRows: [String] = []
         var plan: [(row: ScanItem, targets: [ScanItem])] = []
+        /// Simulator runtimes: removed with simctl after the files, never as files.
+        var runtimeRows: [ScanItem] = []
         for item in items {
             if Task.isCancelled { throw SpruceError.cancelled }
             if let reason = scanner.blockingReason(for: item) {
                 failures.append(ItemFailure(itemID: item.id, title: item.title, reason: reason))
+                continue
+            }
+            if item.metadata[CleanupMetadataKey.mode] == "simulatorRuntime" {
+                runtimeRows.append(item)
                 continue
             }
             let expansion = scanner.expand(item)
@@ -327,6 +334,29 @@ public final class CleanupEngine: CheckupContributor, GroupScanner, @unchecked S
             trashedBytes += outcome.trashedBytes
             trashedCount += outcome.trashedCount
             trashRunIDs += outcome.trashRunIDs
+        }
+        // Simulator runtimes are macOS-managed disk images: Xcode's simctl deletes them.
+        if !runtimeRows.isEmpty, !Task.isCancelled {
+            let simctl = await CleanupSystemProbe.simctlPath()
+            for row in runtimeRows {
+                if Task.isCancelled { break }
+                guard let simctl, let identifier = row.metadata[CleanupMetadataKey.simulatorRuntime],
+                      CleanupSimulatorRuntimes.isValidIdentifier(identifier) else {
+                    failures.append(ItemFailure(itemID: row.id, title: row.title,
+                                                reason: "Xcode's simctl tool isn't available"))
+                    continue
+                }
+                progress(ScanProgress(fraction: nil, message: "Removing \(row.title)…"))
+                let result = await Shell.run(simctl, ["runtime", "delete", identifier], timeout: 300)
+                if result.status == 0 {
+                    removedRows.append(row.id)
+                    freed += row.size
+                } else {
+                    let message = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+                    failures.append(ItemFailure(itemID: row.id, title: row.title,
+                                                reason: message.isEmpty ? "simctl couldn't remove it" : String(message.prefix(200))))
+                }
+            }
         }
         let cancelled = Task.isCancelled
 

@@ -233,6 +233,8 @@ public struct CleanupRule: Sendable, Hashable, Identifiable {
         case iosBackup
         case mailDownload
         case derivedData
+        /// Simulator runtimes from `CleanupContext.simulatorRuntimes` (removed with simctl).
+        case simulatorRuntimes
         case mailStored
         case externalTrash
         // Insight-only analyzers:
@@ -446,6 +448,8 @@ public struct CleanupContext: Sendable {
     public var purpose: CleanupScanPurpose
     public var documentRevisionsPaths: [String]
     public var deletedUsersPath: String
+    /// Simulator runtimes Xcode reports (`simctl runtime list -j`); empty without Xcode.
+    public var simulatorRuntimes: [CleanupSimulatorRuntime]
 
     public init(
         home: String,
@@ -465,7 +469,8 @@ public struct CleanupContext: Sendable {
         now: Date = Date(),
         purpose: CleanupScanPurpose = .module,
         documentRevisionsPaths: [String] = ["/System/Volumes/Data/.DocumentRevisions-V100", "/.DocumentRevisions-V100"],
-        deletedUsersPath: String = "/Users/Deleted Users"
+        deletedUsersPath: String = "/Users/Deleted Users",
+        simulatorRuntimes: [CleanupSimulatorRuntime] = []
     ) {
         self.home = home
         self.systemRoot = systemRoot
@@ -485,6 +490,7 @@ public struct CleanupContext: Sendable {
         self.purpose = purpose
         self.documentRevisionsPaths = documentRevisionsPaths
         self.deletedUsersPath = deletedUsersPath
+        self.simulatorRuntimes = simulatorRuntimes
     }
 
     /// The real user id of this process.
@@ -628,4 +634,6 @@ public enum CleanupMetadataKey {
     public static let parentID = "parentID"
     public static let latestBackup = "latestBackup"
     public static let trashBin = "trashBin"
+    /// The simctl identifier of a simulator runtime row (mode "simulatorRuntime").
+    public static let simulatorRuntime = "simulatorRuntime"
 }

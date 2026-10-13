@@ -178,6 +178,9 @@ public struct CleanupScanner: Sendable {
         case .externalTrash:
             result.items = externalTrashItems(rule, onProgress: onProgress)
             return result
+        case .simulatorRuntimes:
+            result.items = simulatorRuntimeItems(rule)
+            return result
         case .mailStored:
             let scan = mailStoredItems(rule, onProgress: onProgress)
             result.items = scan.items
@@ -490,6 +493,36 @@ public struct CleanupScanner: Sendable {
             .sorted { $0.path < $1.path }
     }
 
+    /// Simulator runtimes Xcode reported (never pre-selected; the engine removes them with
+    /// `simctl runtime delete`, not as files).
+    func simulatorRuntimeItems(_ rule: CleanupRule) -> [ScanItem] {
+        let blocker = gateBlocker(rule: rule, owner: nil)
+        return context.simulatorRuntimes.compactMap { runtime -> ScanItem? in
+            guard runtime.isDeletable, runtime.sizeBytes > 0,
+                  CleanupSimulatorRuntimes.isValidIdentifier(runtime.identifier) else { return nil }
+            if let path = runtime.path, settings.isIgnored(path: path) { return nil }
+            var metadata: [String: String] = [
+                CleanupMetadataKey.ruleID: rule.id,
+                CleanupMetadataKey.category: rule.category.rawValue,
+                CleanupMetadataKey.mode: "simulatorRuntime",
+                CleanupMetadataKey.simulatorRuntime: runtime.identifier,
+                CleanupMetadataKey.recommended: "0",
+            ]
+            var note = rule.note
+            if let blocker {
+                metadata[CleanupMetadataKey.inUse] = "1"
+                note = "\(blocker) — quit it to remove this. " + note
+            }
+            var subtitle = "Simulator runtime"
+            if let build = runtime.build, !build.isEmpty { subtitle += " · build \(build)" }
+            let url = runtime.path.flatMap { FileManager.default.fileExists(atPath: $0) ? URL(fileURLWithPath: $0) : nil }
+            return ScanItem(id: "simulator-runtime:" + runtime.identifier,
+                            title: "\(runtime.platform) \(runtime.version) Simulator", subtitle: subtitle, url: url,
+                            size: runtime.sizeBytes, itemCount: 1, safety: .review, isSelected: false,
+                            deletion: .remove, lastUsed: runtime.lastUsed, note: note, metadata: metadata)
+        }
+    }
+
     // MARK: Expansion for removal
 
     /// The concrete targets to dispose of for one selected row. Whole rows are returned
@@ -497,6 +530,10 @@ public struct CleanupScanner: Sendable {
     /// filters after checking the folder is still the object that was scanned.
     public func expand(_ item: ScanItem) -> CleanupExpansion {
         let mode = item.metadata[CleanupMetadataKey.mode] ?? "whole"
+        if mode == "simulatorRuntime" {
+            // Never removed as files: the engine asks simctl to delete the runtime.
+            return CleanupExpansion(failure: "Simulator runtimes are removed with Xcode's simctl tool")
+        }
         guard mode != "whole" else {
             // A quit-first file row keeps the floor too: skip it if it changed in the last
             // minutes (something may still be writing it).
