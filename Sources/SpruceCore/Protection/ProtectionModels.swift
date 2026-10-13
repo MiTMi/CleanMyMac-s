@@ -386,9 +386,23 @@ public struct ProtectionMalwareReport: Codable, Sendable, Equatable {
         self.unreadableLocations = unreadableLocations
     }
 
+    /// Findings in the report. Reports kept by the engine already leave out what the user
+    /// ignored (`excludingIgnored`), so this is what the review list shows.
     public var threatCount: Int { findings.count }
     public var recommendedCount: Int { findings.filter(\.isRecommendedForRemoval).count }
     public var knownCount: Int { findings.filter(\.isKnownThreat).count }
+
+    /// The same report without the findings on the ignore list (by path or item id), so
+    /// counts, history and health match the review list the user sees.
+    public func excludingIgnored(_ settings: SpruceSettings) -> ProtectionMalwareReport {
+        guard !settings.ignoredPaths.isEmpty || !settings.ignoredItemIDs.isEmpty || !settings.ignoredBundleIDs.isEmpty else {
+            return self
+        }
+        let visible = Set(settings.filteringIgnored(ProtectionThreatFinding.scanGroups(findings)).allItems.map(\.id))
+        var copy = self
+        copy.findings = findings.filter { visible.contains($0.id) }
+        return copy
+    }
 }
 
 // MARK: - Scan item mapping
@@ -530,6 +544,8 @@ public struct ProtectionRemovalPlan: Sendable, Equatable {
     public var manualNote: String?
     public var inode: String?
     public var size: Int64
+    /// Matched a documented indicator or hash (not just heuristics).
+    public var isKnownThreat: Bool
 
     public init?(item: ScanItem) {
         guard item.metadata[ProtectionMetaKey.tool] == ProtectionMetaKey.malwareTool else { return nil }
@@ -545,6 +561,8 @@ public struct ProtectionRemovalPlan: Sendable, Equatable {
         manualNote = item.metadata[ProtectionMetaKey.manual]
         inode = item.metadata[ProtectionMetaKey.inode]
         size = item.size
+        let evidence = item.metadata[ProtectionMetaKey.evidence].flatMap(ThreatEvidence.init(rawValue:)) ?? .heuristic
+        isKnownThreat = evidence != .heuristic
     }
 
     /// True when the item is a launchd job that should be unloaded before its files go.

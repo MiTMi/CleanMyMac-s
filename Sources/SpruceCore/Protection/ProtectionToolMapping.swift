@@ -259,6 +259,67 @@ public enum ProtectionLaunchWatch {
         }
         .sorted()
     }
+
+    /// Application bundle names that appeared since `previous` in an Applications folder
+    /// (hidden items and anything that isn't an `.app` are ignored).
+    public static func addedApplications(previous: Set<String>, current: Set<String>) -> [String] {
+        current.subtracting(previous).filter { name in
+            name.lowercased().hasSuffix(".app") && !name.hasPrefix(".")
+        }
+        .sorted()
+    }
+}
+
+// MARK: - Automatic (background) scans
+
+/// How often Spruce runs a Quick malware scan on its own while it is open. Any malware
+/// scan (manual, Checkup or automatic) resets the clock.
+public enum ProtectionBackgroundSchedule: String, CaseIterable, Codable, Sendable, Identifiable {
+    case off
+    case daily
+    case weekly
+
+    public static let defaultValue: ProtectionBackgroundSchedule = .weekly
+
+    public var id: String { rawValue }
+
+    /// Parses a stored value; unknown or missing values fall back to `defaultValue`.
+    public init(setting: String?) {
+        self = setting.flatMap { ProtectionBackgroundSchedule(rawValue: $0.lowercased()) } ?? Self.defaultValue
+    }
+
+    public var title: String {
+        switch self {
+        case .off: return "Off"
+        case .daily: return "Daily"
+        case .weekly: return "Weekly"
+        }
+    }
+
+    /// Time between automatic scans; nil when they are off.
+    public var interval: TimeInterval? {
+        switch self {
+        case .off: return nil
+        case .daily: return 86_400
+        case .weekly: return 7 * 86_400
+        }
+    }
+
+    public var detail: String {
+        switch self {
+        case .off: return "Spruce only scans when you ask it to."
+        case .daily: return "A quick scan once a day while Spruce is open."
+        case .weekly: return "A quick scan once a week while Spruce is open."
+        }
+    }
+
+    /// True when an automatic scan should run now: scans are on and the last malware scan
+    /// (of any kind) is older than the interval, or there never was one.
+    public func isDue(lastScan: Date?, now: Date = Date()) -> Bool {
+        guard let interval else { return false }
+        guard let lastScan else { return true }
+        return now.timeIntervalSince(lastScan) >= interval
+    }
 }
 
 /// A new startup item noticed by real-time protection.
@@ -287,13 +348,23 @@ public struct ProtectionRealtimeEvent: Identifiable, Sendable, Hashable, Codable
     public var name: String { label ?? (path as NSString).lastPathComponent }
     public var location: String { (path as NSString).deletingLastPathComponent.abbreviatingHome }
 
+    /// A newly installed app (rather than a startup item).
+    public var isApplication: Bool { kind == .application }
+
     public var notificationTitle: String {
+        if isApplication {
+            guard let finding else { return "New app installed" }
+            return finding.isKnownThreat ? "Threat installed" : "Suspicious app installed"
+        }
         guard let finding else { return "New startup item" }
         return finding.isKnownThreat ? "Threat added to startup items" : "Suspicious startup item"
     }
 
     public var notificationBody: String {
         guard let finding else {
+            if isApplication {
+                return "\(name) was added to \(location)."
+            }
             return "\(name) will now run automatically (\(location)). If you didn't just install something, review it in Spruce."
         }
         let what = finding.family.map { "\($0) (\(finding.category.title.lowercased()))" } ?? finding.category.title

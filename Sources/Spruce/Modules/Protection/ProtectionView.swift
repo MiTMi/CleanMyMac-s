@@ -42,6 +42,9 @@ struct ProtectionRootScreen: View {
         .onReceive(NotificationCenter.default.publisher(for: ProtectionRealtimeMonitor.eventNotification)) { _ in
             screen.reloadRealtimeEvents()
         }
+        .onReceive(NotificationCenter.default.publisher(for: ProtectionEngine.automaticScanNotification)) { _ in
+            screen.automaticScanFinished()
+        }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             screen.refreshFullDiskAccess()
         }

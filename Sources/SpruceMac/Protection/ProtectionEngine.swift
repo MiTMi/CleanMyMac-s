@@ -16,8 +16,16 @@ import SpruceCore
 /// The Privacy and App Permissions tools have their own scanners (`privacy`,
 /// `permissions`) so each tool can run its own scan → review → act journey.
 public final class ProtectionEngine: CheckupContributor, GroupScanner, @unchecked Sendable {
-    public var checkupReview: [ScanGroup] = []
+    /// Threats found by the last Checkup scan. Written by background scans and read and
+    /// edited by the Checkup screen, so it lives behind the engine's lock.
+    public var checkupReview: [ScanGroup] {
+        get { state.current.checkupReview }
+        set { state.update { $0.checkupReview = newValue } }
+    }
     public let module: ModuleID = .protection
+
+    /// Posted on the main thread after an automatic (background) scan finished.
+    public static let automaticScanNotification = Notification.Name("SpruceProtectionAutomaticScan")
 
     /// Browser and macOS privacy traces.
     public let privacy: ProtectionPrivacyCleaner
@@ -28,21 +36,35 @@ public final class ProtectionEngine: CheckupContributor, GroupScanner, @unchecke
 
     let probe = ProtectionMacSystemProbe()
     private let state = ProtectionLocked(ProtectionEngineState())
+    private let background = ProtectionBackgroundScanner()
 
     public init() {
         privacy = ProtectionPrivacyCleaner()
         permissions = ProtectionPermissionsReviewer()
         realtime = ProtectionRealtimeMonitor(probe: probe)
-        // Real-time protection follows Settings › Protection for the app's whole lifetime.
+        // Real-time protection follows Settings › Protection for the app's whole lifetime,
+        // and automatic scans run on the schedule chosen on the Protection hub.
         DispatchQueue.main.async { [weak self] in
-            self?.followRealtimeSetting()
+            guard let self else { return }
+            self.followRealtimeSetting()
+            self.background.start(engine: self)
         }
     }
 
     // MARK: Results
 
-    /// The last completed malware scan (module or Checkup).
+    /// The last completed malware scan (module, Checkup or automatic), without the
+    /// findings the user ignored.
     public var lastMalwareReport: ProtectionMalwareReport? { state.current.malwareReport }
+
+    /// The last automatic (background) scan since launch.
+    public var lastAutomaticReport: ProtectionMalwareReport? { state.current.automaticReport }
+
+    /// How often automatic Quick scans run (stored per Mac in user defaults).
+    public var backgroundSchedule: ProtectionBackgroundSchedule {
+        get { ProtectionBackgroundScanner.storedSchedule }
+        set { ProtectionBackgroundScanner.storedSchedule = newValue }
+    }
 
     /// macOS's own protection layers, as last read by `appleProtectionStatus()`.
     public var lastAppleStatus: ProtectionAppleStatus? { state.current.appleStatus }
@@ -63,19 +85,51 @@ public final class ProtectionEngine: CheckupContributor, GroupScanner, @unchecke
     /// Runs a malware scan: startup items, helpers, known threat locations, cron, browser
     /// policies (all depths); apps, Application Support and shared folders (balanced, deep);
     /// the whole home folder (deep). Signatures are checked with the Security framework
-    /// and suspicious files are hashed against known samples.
+    /// and suspicious files are hashed against known samples. Online-only cloud files are
+    /// never downloaded. The report leaves out findings on the ignore list, so its count,
+    /// the history entry and Activity's health match the review list.
     public func scanMalware(depth: ProtectionScanDepth, progress: @escaping ProgressHandler) async throws -> ProtectionMalwareReport {
+        try await scanMalware(depth: depth, automatic: false, progress: progress)
+    }
+
+    func scanMalware(depth: ProtectionScanDepth, automatic: Bool,
+                     progress: @escaping ProgressHandler) async throws -> ProtectionMalwareReport {
         progress(ScanProgress(fraction: 0, message: "Preparing a \(depth.title.lowercased()) scan…"))
         let crontab = await Self.readCrontab()
         let scanner = makeScanner(crontab: crontab)
-        let report = try await ProtectionMac.runBlocking { flag in
+        let raw = try await ProtectionMac.runBlocking(qos: automatic ? .utility : .userInitiated) { flag in
             try scanner.scan(depth: depth, progress: progress, isCancelled: { flag.isCancelled })
         }
-        state.update { $0.malwareReport = report }
+        let settings = await ProtectionMac.settings()
+        let report = raw.excludingIgnored(settings)
+        state.update {
+            $0.malwareReport = report
+            if automatic { $0.automaticReport = report }
+        }
+        let kind = automatic ? "Automatic \(depth.title.lowercased())" : depth.title
         let summary = report.threatCount == 0
-            ? "\(depth.title) malware scan: no threats"
-            : "\(depth.title) malware scan: \(CountFormat.items(report.threatCount, singular: "threat"))"
+            ? "\(kind) malware scan: no threats"
+            : "\(kind) malware scan: \(CountFormat.items(report.threatCount, singular: "threat"))"
         await ProtectionMac.record(ActivityEntry(module: .protection, kind: .malwareScan, count: report.threatCount, summary: summary))
+        return report
+    }
+
+    /// The automatic Quick scan: keeps its results for review and alerts when it found
+    /// something (respecting the threat-notification setting).
+    @discardableResult
+    func runAutomaticScan() async throws -> ProtectionMalwareReport {
+        let report = try await scanMalware(depth: .quick, automatic: true, progress: { _ in })
+        await MainActor.run {
+            if report.threatCount > 0, SettingsStore.shared.settings.notifyThreats {
+                let known = report.knownCount > 0
+                Notifier.post(id: "app.spruce.protection.automatic.\(Int(report.date.timeIntervalSince1970))",
+                              title: known ? "Threats found" : "Suspicious items found",
+                              body: "An automatic quick scan found \(CountFormat.items(report.threatCount, singular: "item")) to review. "
+                                  + "Open Spruce › Protection › Malware Removal to remove them.",
+                              module: ModuleID.protection.rawValue, tool: "protection.malware")
+            }
+            NotificationCenter.default.post(name: Self.automaticScanNotification, object: self)
+        }
         return report
     }
 
@@ -108,7 +162,8 @@ public final class ProtectionEngine: CheckupContributor, GroupScanner, @unchecke
         let selected = checkupReview.selectedItems
         guard !selected.isEmpty else { return RunOutcome(module: module, summary: "No threats selected") }
         let outcome = try await perform(selected, progress: progress)
-        checkupReview.removeItems(withIDs: Set(outcome.removedItemIDs))
+        let done = Set(outcome.removedItemIDs)
+        state.update { $0.checkupReview.removeItems(withIDs: done) }
         return outcome
     }
 
@@ -165,5 +220,7 @@ public final class ProtectionEngine: CheckupContributor, GroupScanner, @unchecke
 /// Latest results kept by the engine.
 struct ProtectionEngineState: Sendable {
     var malwareReport: ProtectionMalwareReport?
+    var automaticReport: ProtectionMalwareReport?
     var appleStatus: ProtectionAppleStatus?
+    var checkupReview: [ScanGroup] = []
 }

@@ -5,7 +5,8 @@ import SpruceCore
 /// Real-time protection: watches the launchd folders malware uses to stay on a Mac and
 /// alerts when a new third-party startup item appears (notify-only, never removes on its
 /// own). Each new item is evaluated with the malware scanner, so known threats and
-/// suspicious items get a stronger alert.
+/// suspicious items get a stronger alert. Newly installed apps in /Applications and
+/// ~/Applications are checked against the threat catalog too; only flagged apps alert.
 ///
 /// Folder changes arrive through `DispatchSource` file-system sources (one per folder);
 /// a one-minute timer re-checks everything as a fallback and picks up folders that are
@@ -30,6 +31,8 @@ public final class ProtectionRealtimeMonitor: @unchecked Sendable {
     // Confined to `queue`.
     private var sources: [String: DispatchSourceFileSystemObject] = [:]
     private var snapshots: [String: Set<String>] = [:]
+    /// New apps whose Info.plist hasn't appeared yet (still being copied): path → (folder, checks so far).
+    private var pendingApps: [String: (folder: Folder, attempts: Int)] = [:]
     private var timer: DispatchSourceTimer?
     private var pendingCheck: DispatchWorkItem?
     private var active = false
@@ -62,6 +65,8 @@ public final class ProtectionRealtimeMonitor: @unchecked Sendable {
             Folder(path: NSHomeDirectory() + "/Library/LaunchAgents", domain: .user, kind: .launchAgent),
             Folder(path: "/Library/LaunchAgents", domain: .user, kind: .launchAgent),
             Folder(path: "/Library/LaunchDaemons", domain: .system, kind: .launchDaemon),
+            Folder(path: "/Applications", domain: .user, kind: .application),
+            Folder(path: NSHomeDirectory() + "/Applications", domain: .user, kind: .application),
         ]
     }
 
@@ -96,6 +101,7 @@ public final class ProtectionRealtimeMonitor: @unchecked Sendable {
             for source in self.sources.values { source.cancel() }
             self.sources.removeAll()
             self.snapshots.removeAll()
+            self.pendingApps.removeAll()
         }
     }
 
@@ -142,27 +148,59 @@ public final class ProtectionRealtimeMonitor: @unchecked Sendable {
     private func check() {
         guard active else { return }
         var added: [(Folder, String)] = []
+        var addedApps: [(Folder, String)] = pendingApps.map { ($0.value.folder, $0.key) }
         for folder in folders {
             if sources[folder.path] == nil { attach(folder) }
             let current = Self.listing(folder.path)
             let previous = snapshots[folder.path] ?? []
-            for name in ProtectionLaunchWatch.addedItems(previous: previous, current: current) {
-                added.append((folder, folder.path + "/" + name))
+            if folder.kind == .application {
+                for name in ProtectionLaunchWatch.addedApplications(previous: previous, current: current) {
+                    let path = folder.path + "/" + name
+                    if pendingApps[path] == nil { addedApps.append((folder, path)) }
+                }
+            } else {
+                for name in ProtectionLaunchWatch.addedItems(previous: previous, current: current) {
+                    added.append((folder, folder.path + "/" + name))
+                }
             }
             snapshots[folder.path] = current
         }
-        guard !added.isEmpty else { return }
+        guard !added.isEmpty || !addedApps.isEmpty else { return }
         let home = NSHomeDirectory()
         let scanner = ProtectionMalwareScanner(space: ProtectionPathSpace(home: home), probe: probe)
         let threshold = ProtectionScanDepth.balanced.heuristicThreshold
-        let newEvents = added.map { folder, path -> ProtectionRealtimeEvent in
+        var newEvents = added.map { folder, path -> ProtectionRealtimeEvent in
             let item = ProtectionLaunchItem.parse(path: path, domain: folder.domain, kind: folder.kind, home: home)
             let finding = scanner.evaluateLaunchPlist(path: path, domain: folder.domain, kind: folder.kind, threshold: threshold)
             return ProtectionRealtimeEvent(path: path, label: item.label, domain: folder.domain, kind: folder.kind,
                                            finding: finding)
         }
+        // New apps: notify only when the threat catalog flags them (installing apps is normal).
+        for (folder, path) in addedApps {
+            guard FileWalker.entry(at: path) != nil else {
+                pendingApps[path] = nil
+                continue
+            }
+            if FileWalker.entry(at: path + "/Contents/Info.plist") == nil {
+                // Still being copied: look again on the next check (for about ten minutes).
+                let attempts = (pendingApps[path]?.attempts ?? 0) + 1
+                if attempts < 10 {
+                    pendingApps[path] = (folder: folder, attempts: attempts)
+                } else {
+                    pendingApps[path] = nil
+                }
+                continue
+            }
+            pendingApps[path] = nil
+            if let finding = scanner.evaluateApplication(at: path) {
+                newEvents.append(ProtectionRealtimeEvent(path: path, label: nil, domain: folder.domain, kind: .application,
+                                                         finding: finding))
+            }
+        }
+        guard !newEvents.isEmpty else { return }
+        let events = newEvents
         DispatchQueue.main.async { [weak self] in
-            self?.deliver(newEvents)
+            self?.deliver(events)
         }
     }
 

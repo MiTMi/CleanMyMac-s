@@ -227,7 +227,7 @@ struct ProtectionRealtimeCard: View {
                         Text("Real-time protection")
                             .font(SpruceFont.headline)
                             .foregroundStyle(Ink.primary)
-                        Text(enabled ? "Watching startup folders for new items" : "Off. New startup items aren't checked.")
+                        Text(enabled ? "Watching startup folders and new apps" : "Off. New startup items and apps aren't checked.")
                             .font(SpruceFont.caption)
                             .foregroundStyle(ink.secondary)
                     }
@@ -240,10 +240,12 @@ struct ProtectionRealtimeCard: View {
                     .labelsHidden()
                     .tint(ModuleID.protection.palette.accent)
                 }
-                Text("Spruce checks every new launch agent and daemon as it appears and alerts you, without removing anything on its own.")
+                Text("Spruce checks every new launch agent, daemon and app as it appears and alerts you, without removing anything on its own.")
                     .font(SpruceFont.caption)
                     .foregroundStyle(ink.tertiary)
                     .fixedSize(horizontal: false, vertical: true)
+                Divider().overlay(Ink.hairline)
+                automaticScans
                 if enabled && !model.settings.settings.notifyThreats {
                     Label("Threat notifications are off in Settings.", systemImage: "bell.slash")
                         .font(SpruceFont.caption)
@@ -254,6 +256,46 @@ struct ProtectionRealtimeCard: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .frame(maxWidth: .infinity)
+    }
+
+    /// Automatic Quick scans: schedule picker and the last result.
+    private var automaticScans: some View {
+        let ink = PrismInk(contrast)
+        let on = screen.backgroundSchedule != .off
+        return HStack(spacing: Spacing.m) {
+            Image(systemName: on ? "clock.arrow.circlepath" : "clock")
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(on ? StatusColor.success : ink.tertiary)
+                .frame(width: 24)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Automatic scans")
+                    .font(SpruceFont.headline)
+                    .foregroundStyle(Ink.primary)
+                Text(automaticLine)
+                    .font(SpruceFont.caption)
+                    .foregroundStyle(ink.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: Spacing.s)
+            Picker("Automatic scans", selection: $screen.backgroundSchedule) {
+                ForEach(ProtectionBackgroundSchedule.allCases) { schedule in
+                    Text(schedule.title).tag(schedule)
+                }
+            }
+            .pickerStyle(.menu)
+            .labelsHidden()
+            .fixedSize()
+            .tint(ModuleID.protection.palette.accent)
+        }
+        .accessibilityElement(children: .contain)
+    }
+
+    private var automaticLine: String {
+        guard let report = screen.automaticReport else { return screen.backgroundSchedule.detail }
+        let result = report.threatCount == 0
+            ? "no threats"
+            : CountFormat.items(report.threatCount, singular: "threat") + " to review"
+        return "Last automatic scan \(DurationFormat.relative(report.date)): \(result)."
     }
 
     @ViewBuilder

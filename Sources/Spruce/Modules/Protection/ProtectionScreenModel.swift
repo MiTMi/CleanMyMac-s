@@ -133,6 +133,8 @@ final class ProtectionScreenModel {
     private(set) var isReadingAppleStatus = false
     private(set) var realtimeEvents: [ProtectionRealtimeEvent] = []
     private(set) var malwareReport: ProtectionMalwareReport?
+    /// The last automatic scan since launch.
+    private(set) var automaticReport: ProtectionMalwareReport?
     private(set) var privacyReport: ProtectionPrivacyReport?
     private(set) var permissionsReport: ProtectionPermissionsReport?
     private(set) var hasFullDiskAccess = Permissions.hasFullDiskAccess
@@ -143,7 +145,16 @@ final class ProtectionScreenModel {
     var confirmPrivacyClean = false
     var confirmPermissionReset = false
 
+    /// How often Spruce scans on its own (Protection hub › Automatic scans).
+    var backgroundSchedule: ProtectionBackgroundSchedule {
+        didSet {
+            if backgroundSchedule != oldValue { engine.backgroundSchedule = backgroundSchedule }
+        }
+    }
+
     @ObservationIgnored private var scanStarts: [ProtectionTool: Date] = [:]
+    /// The automatic scan whose results were last put into Malware Removal.
+    @ObservationIgnored private var adoptedAutomaticScan: Date?
 
     static func shared(for engine: ProtectionEngine) -> ProtectionScreenModel {
         ProtectionScreenRegistry.model(for: engine)
@@ -155,6 +166,7 @@ final class ProtectionScreenModel {
         privacy = ScanFlowModel(module: .protection, scanner: engine.privacy, historyKind: ProtectionTool.privacy.historyKind)
         permissions = ScanFlowModel(module: .protection, scanner: engine.permissions,
                                     historyKind: ProtectionTool.permissions.historyKind)
+        backgroundSchedule = engine.backgroundSchedule
         malwareReport = engine.lastMalwareReport
     }
 
@@ -172,6 +184,7 @@ final class ProtectionScreenModel {
         refreshFullDiskAccess()
         reloadRealtimeEvents()
         syncReports()
+        adoptAutomaticResults()
         if appleStatus == nil { refreshAppleStatus() }
     }
 
@@ -196,10 +209,47 @@ final class ProtectionScreenModel {
     }
 
     /// Picks up the engines' latest reports (results may arrive while another module is shown).
+    /// Findings ignored since the scan are left out, so the copy matches the review list.
     func syncReports() {
-        malwareReport = engine.lastMalwareReport
+        let settings = SettingsStore.shared.settings
+        malwareReport = engine.lastMalwareReport?.excludingIgnored(settings)
+        automaticReport = engine.lastAutomaticReport?.excludingIgnored(settings)
         privacyReport = engine.privacy.lastReport
         permissionsReport = engine.permissions.lastReport
+    }
+
+    /// An automatic scan finished while Spruce was open.
+    func automaticScanFinished() {
+        syncReports()
+        adoptAutomaticResults()
+    }
+
+    /// Puts the threats of the latest automatic scan into Malware Removal for review,
+    /// unless the user is in the middle of something there. Each automatic scan is
+    /// adopted once (Start Over doesn't bring it back).
+    func adoptAutomaticResults() {
+        guard let report = engine.lastAutomaticReport, report.date > (adoptedAutomaticScan ?? .distantPast) else { return }
+        // Superseded by a newer scan or removal: its list would be out of date.
+        let newerActivity = [engine.lastMalwareReport?.date, malware.lastScanDate, malware.outcome?.date].compactMap { $0 }
+        if newerActivity.contains(where: { $0 > report.date }) {
+            adoptedAutomaticScan = report.date
+            return
+        }
+        switch malware.phase {
+        case .idle, .failed:
+            break
+        case .done where malware.groups.isEmpty:
+            break
+        case .results where (malware.lastScanDate ?? .distantPast) < report.date && malware.groups.isEmpty:
+            break
+        default:
+            return
+        }
+        adoptedAutomaticScan = report.date
+        let groups = SettingsStore.shared.settings.filteringIgnored(ProtectionThreatFinding.scanGroups(report.findings))
+        guard !groups.isEmpty else { return }
+        malware.groups = groups
+        malware.showRemaining()
     }
 
     func phaseChanged(_ tool: ProtectionTool, from old: ScanFlowModel.Phase, to new: ScanFlowModel.Phase) {
@@ -224,6 +274,7 @@ final class ProtectionScreenModel {
     // MARK: Navigation
 
     func open(_ tool: ProtectionTool) {
+        if tool == .malware { adoptAutomaticResults() }
         route = .tool(tool)
     }
 
@@ -255,6 +306,12 @@ final class ProtectionScreenModel {
 
     var selectedThreatsNeedingReview: [ScanItem] {
         malware.selectedItems.filter { $0.safety != .safe }
+    }
+
+    /// Never reports this threat again, and updates the counts that mention it.
+    func ignoreThreat(_ item: ScanItem) {
+        malware.ignore(item)
+        syncReports()
     }
 
     func requestThreatRemoval() {

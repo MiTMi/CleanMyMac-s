@@ -50,13 +50,34 @@ final class ProtectionLocked<Value>: @unchecked Sendable {
 
 /// Small macOS helpers shared by the Protection engines.
 enum ProtectionMac {
+    // <sys/resource.h>: IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES = 3, IOPOL_SCOPE_THREAD = 1,
+    // IOPOL_MATERIALIZE_DATALESS_FILES_OFF = 1 (TN3150). Literal values keep this compiling
+    // with SDKs that don't export the macro names to Swift.
+    private static let iopolTypeMaterialize: Int32 = 3
+    private static let iopolScopeThread: Int32 = 1
+    private static let iopolMaterializeOff: Int32 = 1
+
     /// Runs blocking work on a GCD queue (long scans stay off the main thread and the
     /// cooperative pool). Cancelling the calling task flips the flag the work polls.
-    static func runBlocking<T: Sendable>(_ work: @escaping @Sendable (ProtectionCancelFlag) throws -> T) async throws -> T {
+    ///
+    /// While the work runs, its thread may not materialise (download) online-only iCloud
+    /// or File Provider files: touching one fails instead of starting a download, so a
+    /// scan never pulls the user's cloud documents onto the Mac. The thread's previous
+    /// policy is restored afterwards (GCD threads are reused).
+    static func runBlocking<T: Sendable>(qos: DispatchQoS.QoSClass = .userInitiated,
+                                         _ work: @escaping @Sendable (ProtectionCancelFlag) throws -> T) async throws -> T {
         let flag = ProtectionCancelFlag()
+        let type = iopolTypeMaterialize
+        let scope = iopolScopeThread
+        let off = iopolMaterializeOff
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<T, Error>) in
-                DispatchQueue.global(qos: .userInitiated).async {
+                DispatchQueue.global(qos: qos).async {
+                    let previous = getiopolicy_np(type, scope)
+                    _ = setiopolicy_np(type, scope, off)
+                    defer {
+                        if previous >= 0 { _ = setiopolicy_np(type, scope, previous) }
+                    }
                     do {
                         continuation.resume(returning: try work(flag))
                     } catch {
@@ -108,10 +129,10 @@ enum ProtectionMac {
                 let group = DispatchGroup()
                 group.enter()
                 DispatchQueue.global(qos: .utility).async {
-                    errData.current = errPipe.fileHandleForReading.readDataToEndOfFile()
+                    errData.current = (try? errPipe.fileHandleForReading.readToEnd()) ?? Data()
                     group.leave()
                 }
-                let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
+                let outData = (try? outPipe.fileHandleForReading.readToEnd()) ?? Data()
                 group.wait()
                 process.waitUntilExit()
                 timer.cancel()
@@ -135,24 +156,41 @@ enum ProtectionMac {
         return (folder as NSString).appendingPathComponent("com.apple.QuickLook.thumbnailcache")
     }
 
-    /// Force-quits running apps whose bundle is (or contains) one of `bundlePaths`, then
-    /// waits up to three seconds for them to exit. Returns how many were asked to quit.
+    /// Quits running apps whose bundle is (or contains) one of the given paths. Every app
+    /// is first asked to quit normally; only apps inside `forceBundlePaths` (known threats)
+    /// that are still running after `grace` seconds are force-quit. Apps that were merely
+    /// flagged as suspicious are never force-quit, so nobody loses unsaved work to a
+    /// heuristic. Returns how many apps were running.
     @MainActor
-    static func forceQuitApps(inside bundlePaths: [String]) async -> Int {
+    static func quitApps(inside bundlePaths: [String], forceBundlePaths: [String], grace: TimeInterval = 4) async -> Int {
         let roots = bundlePaths.map { ($0 as NSString).standardizingPath }
+        let forceRoots = forceBundlePaths.map { ($0 as NSString).standardizingPath }
         guard !roots.isEmpty else { return 0 }
         let own = ProcessInfo.processInfo.processIdentifier
-        let targets = NSWorkspace.shared.runningApplications.filter { app in
-            guard app.processIdentifier != own else { return false }
+        func isInside(_ app: NSRunningApplication, _ list: [String]) -> Bool {
             let paths = [app.bundleURL?.standardizedFileURL.path, app.executableURL?.standardizedFileURL.path].compactMap { $0 }
-            return paths.contains { path in roots.contains { path == $0 || path.hasPrefix($0 + "/") } }
+            return paths.contains { path in list.contains { path == $0 || path.hasPrefix($0 + "/") } }
         }
-        for app in targets { app.forceTerminate() }
-        let deadline = Date().addingTimeInterval(3)
-        while Date() < deadline, targets.contains(where: { !$0.isTerminated }) {
-            try? await Task.sleep(nanoseconds: 150_000_000)
+        let targets = NSWorkspace.shared.runningApplications.filter { app in
+            app.processIdentifier != own && !app.isTerminated && isInside(app, roots)
+        }
+        guard !targets.isEmpty else { return 0 }
+        for app in targets { app.terminate() }
+        await waitForExit(targets, timeout: grace)
+        let stubborn = targets.filter { !$0.isTerminated && isInside($0, forceRoots) }
+        if !stubborn.isEmpty {
+            for app in stubborn { app.forceTerminate() }
+            await waitForExit(stubborn, timeout: 3)
         }
         return targets.count
+    }
+
+    @MainActor
+    private static func waitForExit(_ apps: [NSRunningApplication], timeout: TimeInterval) async {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline, apps.contains(where: { !$0.isTerminated }) {
+            try? await Task.sleep(nanoseconds: 150_000_000)
+        }
     }
 
     /// Short failure text from a tool's output.

@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import Foundation
 import SpruceCore
 
@@ -51,6 +52,31 @@ public final class ProtectionPrivacyCleaner: GroupScanner, @unchecked Sendable {
             .filter { !$0.isTerminated }
     }
 
+    /// True when a Firefox profile is open in some Firefox (release, Beta, Developer
+    /// Edition, Nightly…): its `.parentlock` holds an `fcntl` lock, or its `lock` symlink
+    /// names a process that is still alive.
+    public static func isGeckoProfileInUse(_ profile: String) -> Bool {
+        let parentLock = profile + "/.parentlock"
+        let fd = open(parentLock, O_RDONLY | O_NONBLOCK)
+        if fd >= 0 {
+            defer { close(fd) }
+            var probe: flock = .init()
+            probe.l_type = Int16(F_WRLCK)
+            probe.l_whence = Int16(SEEK_SET)
+            probe.l_start = 0
+            probe.l_len = 0
+            if fcntl(fd, F_GETLK, &probe) == 0, probe.l_type != Int16(F_UNLCK) {
+                return true
+            }
+        }
+        if let target = try? FileManager.default.destinationOfSymbolicLink(atPath: profile + "/lock"),
+           let pid = ProtectionPrivacyCatalog.geckoLockOwnerPID(symlinkTarget: target),
+           kill(pid, 0) == 0 || errno == EPERM {
+            return true
+        }
+        return false
+    }
+
     /// Ids of the supported browsers that are open right now.
     public static func runningSourceIDs() -> Set<String> {
         Set(ProtectionPrivacyCatalog.browsers.map(\.id.rawValue).filter { !runningApplications(sourceID: $0).isEmpty })
@@ -101,6 +127,8 @@ public final class ProtectionPrivacyCleaner: GroupScanner, @unchecked Sendable {
         var filesByPlan: [(plan: ProtectionPrivacyPlan, ids: [String])] = []
         var customPlans: [(plan: ProtectionPrivacyPlan, size: Int64)] = []
         var seen = Set<String>()
+        // Plans of which some files were skipped (they stay in the list as not done).
+        var partialPlans = Set<String>()
 
         for item in items {
             guard let plan = ProtectionPrivacyPlan(item: item) else { continue }
@@ -120,8 +148,31 @@ public final class ProtectionPrivacyCleaner: GroupScanner, @unchecked Sendable {
                 customPlans.append((plan, item.size))
                 continue
             }
+            // Firefox channels share one Profiles folder: a profile some Firefox still has
+            // open (Developer Edition, Nightly…) is never touched, even if the release
+            // browser is closed.
+            var files = plan.files
+            if plan.sourceID == ProtectionBrowserID.firefox.rawValue,
+               let firefox = ProtectionPrivacyCatalog.browser(.firefox) {
+                let space = ProtectionPathSpace(home: NSHomeDirectory())
+                let dataRoot = space.real(firefox.dataRoot)
+                let cacheRoot = firefox.cacheRoot.map { space.real($0) }
+                var inUse: [String: Bool] = [:]
+                files = files.filter { file in
+                    guard let profile = ProtectionPrivacyCatalog.geckoProfileFolder(of: file.path, dataRoot: dataRoot,
+                                                                                    cacheRoot: cacheRoot) else { return true }
+                    if inUse[profile] == nil { inUse[profile] = Self.isGeckoProfileInUse(profile) }
+                    return inUse[profile] != true
+                }
+                if files.count < plan.files.count {
+                    failures.append(ItemFailure(itemID: plan.itemID, title: title,
+                                                reason: "A Firefox profile is in use (Firefox, Developer Edition or Nightly is open). Quit it, then clean again."))
+                    guard !files.isEmpty else { continue }
+                    partialPlans.insert(plan.itemID)
+                }
+            }
             var ids: [String] = []
-            for file in plan.files {
+            for file in files {
                 let url = URL(fileURLWithPath: file.path)
                 // Permanent removal only where PathGuard allows it; everything else is recoverable.
                 let method: DeletionMethod = file.deletion == .remove && guardian.check(url, method: .remove).isAllowed
@@ -152,8 +203,9 @@ public final class ProtectionPrivacyCleaner: GroupScanner, @unchecked Sendable {
             for (plan, ids) in filesByPlan {
                 let missing = ids.filter { !done.contains($0) }
                 if missing.isEmpty {
-                    removed.append(plan.itemID)
                     if plan.kind == .recentItems { clearedRecentItems = true }
+                    // Partly cleaned (a profile was in use): already reported, stays in the list.
+                    if !partialPlans.contains(plan.itemID) { removed.append(plan.itemID) }
                 } else {
                     let reason = missing.compactMap { reasons[$0] }.first ?? "Some files couldn't be removed."
                     failures.append(ItemFailure(itemID: plan.itemID,

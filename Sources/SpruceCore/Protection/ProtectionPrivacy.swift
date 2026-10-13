@@ -197,7 +197,9 @@ public enum ProtectionPrivacyCatalog {
                           requiresFullDiskAccess: true),
         ProtectionBrowser(id: .chrome, name: "Google Chrome", bundleIDs: ["com.google.Chrome"], engine: .chromium,
                           dataRoot: "~/Library/Application Support/Google/Chrome", cacheRoot: "~/Library/Caches/Google/Chrome"),
-        ProtectionBrowser(id: .firefox, name: "Firefox", bundleIDs: ["org.mozilla.firefox"], engine: .gecko,
+        // Every Firefox channel keeps its profiles in the same Profiles folder, so all of
+        // them count as "Firefox is open" (rule: browsers must be quit before cleaning).
+        ProtectionBrowser(id: .firefox, name: "Firefox", bundleIDs: geckoBundleIDs, engine: .gecko,
                           dataRoot: "~/Library/Application Support/Firefox", cacheRoot: "~/Library/Caches/Firefox"),
         ProtectionBrowser(id: .edge, name: "Microsoft Edge", bundleIDs: ["com.microsoft.edgemac"], engine: .chromium,
                           dataRoot: "~/Library/Application Support/Microsoft Edge", cacheRoot: "~/Library/Caches/Microsoft Edge"),
@@ -214,6 +216,37 @@ public enum ProtectionPrivacyCatalog {
     ]
 
     public static func browser(_ id: ProtectionBrowserID) -> ProtectionBrowser? { browsers.first { $0.id == id } }
+
+    /// Firefox release, Beta, Developer Edition and Nightly: they share
+    /// `~/Library/Application Support/Firefox/Profiles`.
+    public static let geckoBundleIDs = [
+        "org.mozilla.firefox", "org.mozilla.firefoxbeta", "org.mozilla.firefoxdeveloperedition", "org.mozilla.nightly",
+    ]
+
+    /// The Firefox profile folder (`<dataRoot>/Profiles/<name>`) that `path` belongs to:
+    /// anything inside a profile, or the profile's cache (`<cacheRoot>/Profiles/<name>…`).
+    /// All paths are real (already expanded) paths.
+    public static func geckoProfileFolder(of path: String, dataRoot: String, cacheRoot: String?) -> String? {
+        let standardized = (path as NSString).standardizingPath
+        for base in [dataRoot, cacheRoot].compactMap({ $0 }) {
+            let profiles = (base as NSString).standardizingPath + "/Profiles/"
+            guard standardized.hasPrefix(profiles) else { continue }
+            let name = standardized.dropFirst(profiles.count).split(separator: "/").first.map(String.init) ?? ""
+            guard !name.isEmpty else { return nil }
+            return (dataRoot as NSString).standardizingPath + "/Profiles/" + name
+        }
+        return nil
+    }
+
+    /// The process id in the target of a Firefox profile's `lock` symlink
+    /// ("192.168.1.5:+4242", "127.0.0.1:4242"), nil when it isn't one.
+    public static func geckoLockOwnerPID(symlinkTarget: String) -> Int32? {
+        guard let colon = symlinkTarget.lastIndex(of: ":") else { return nil }
+        var digits = symlinkTarget[symlinkTarget.index(after: colon)...]
+        if digits.hasPrefix("+") { digits = digits.dropFirst() }
+        guard !digits.isEmpty, digits.allSatisfy(\.isNumber), let pid = Int32(digits), pid > 0 else { return nil }
+        return pid
+    }
 
     /// Profile-relative files per trace (Chromium).
     public static let chromiumFiles: [ProtectionTraceKind: [String]] = [

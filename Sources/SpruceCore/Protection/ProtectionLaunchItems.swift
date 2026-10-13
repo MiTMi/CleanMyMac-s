@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(Darwin)
+import Darwin
+#endif
 
 /// A parsed launchd property list (launch agent or daemon).
 public struct ProtectionLaunchItem: Sendable, Hashable {
@@ -181,10 +184,7 @@ public enum ProtectionFileSniffer {
         case "zip", "tar", "tgz", "gz", "xz", "bz2", "7z", "rar": return .archive
         default: break
         }
-        guard let handle = FileHandle(forReadingAtPath: path) else { return .other }
-        defer { try? handle.close() }
-        let data = handle.readData(ofLength: 256)
-        guard data.count >= 4 else { return .other }
+        guard let data = readPrefix(of: path, limit: 256), data.count >= 4 else { return .other }
         let b = [UInt8](data.prefix(4))
         let magic = UInt32(b[0]) << 24 | UInt32(b[1]) << 16 | UInt32(b[2]) << 8 | UInt32(b[3])
         let machO: Set<UInt32> = [0xFEEDFACE, 0xFEEDFACF, 0xCEFAEDFE, 0xCFFAEDFE, 0xCAFEBABE, 0xBEBAFECA]
@@ -222,10 +222,53 @@ public enum ProtectionFileSniffer {
 
     /// Reads up to `limit` bytes of a small text file (scripts, crontabs, plists).
     public static func text(of path: String, limit: Int = 256 * 1024) -> String? {
-        guard let handle = FileHandle(forReadingAtPath: path) else { return nil }
-        defer { try? handle.close() }
-        let data = handle.readData(ofLength: limit)
+        guard let data = readPrefix(of: path, limit: limit) else { return nil }
         return String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1)
+    }
+
+    /// Up to `limit` bytes from the start of a file; nil when it can't be opened or read.
+    ///
+    /// Uses the throwing `FileHandle.read(upToCount:)`: the legacy `readData(ofLength:)`
+    /// raises an Objective-C exception on a read error (a disk I/O error, or a cloud file
+    /// that can't be downloaded), which would take the whole app down mid-scan.
+    public static func readPrefix(of path: String, limit: Int) -> Data? {
+        guard limit > 0, let handle = FileHandle(forReadingAtPath: path) else { return nil }
+        defer { try? handle.close() }
+        do {
+            return try handle.read(upToCount: limit) ?? Data()
+        } catch {
+            return nil
+        }
+    }
+
+    // MARK: Cloud placeholders
+
+    /// `SF_DATALESS` (`<sys/stat.h>`): the item's contents live only in the cloud (iCloud
+    /// Drive with Optimise Mac Storage, File Provider apps).
+    public static let datalessFlag: UInt32 = 0x4000_0000
+
+    /// True for an online-only file or folder. Opening, hashing or signature-checking one
+    /// would download it, so the malware scanner never reads such items. Only partially
+    /// allocated files can be placeholders, so most files cost no extra system call.
+    public static func isCloudPlaceholder(_ entry: FileEntry) -> Bool {
+        if entry.isRegularFile {
+            guard entry.logicalSize > 0, entry.allocatedSize < entry.logicalSize else { return false }
+        } else if !entry.isDirectory {
+            return false
+        }
+        guard let flags = statusFlags(of: entry.path) else { return false }
+        return flags & datalessFlag != 0
+    }
+
+    /// `st_flags` of `path` (without following symlinks); nil where the platform has none.
+    static func statusFlags(of path: String) -> UInt32? {
+        #if canImport(Darwin)
+        var st = stat()
+        guard lstat(path, &st) == 0 else { return nil }
+        return UInt32(st.st_flags)
+        #else
+        return nil
+        #endif
     }
 }
 
