@@ -124,7 +124,9 @@ final class ClutterScreenModel {
     var removalRequest: ClutterRemovalRequest?
     var confirmNewScan = false
     var previewURL: URL?
-    var volumes: [ClutterLocationOption] = []
+    /// Mounted volumes, location names and availability, probed off the main thread so
+    /// rendering never touches the disk (see `refreshVolumes()`).
+    private(set) var locationStatus = ClutterLocationStatus()
 
     // Tool view state (kept while navigating between tools).
     var largeOldQuery = ClutterLargeOldQuery()
@@ -144,6 +146,8 @@ final class ClutterScreenModel {
 
     private var task: Task<Void, Never>?
     private var lastScanTools: Set<ClutterTool> = Set(ClutterTool.allCases)
+    @ObservationIgnored private var isProbingLocations = false
+    @ObservationIgnored private var needsLocationProbe = false
 
     init(engine: ClutterEngine) {
         self.engine = engine
@@ -164,10 +168,30 @@ final class ClutterScreenModel {
     /// Chosen locations (settings form).
     var locations: [String] { settings.settings.clutterLocations }
 
-    var availableLocations: [String] { locations.filter { ClutterLocations.exists($0) } }
+    /// Chosen locations that were there at the last probe (new ones count until probed;
+    /// the engine checks again before walking).
+    var availableLocations: [String] { locations.filter { locationStatus.isAvailable($0) } }
 
     /// Chosen locations that are missing right now (unmounted disks, renamed folders).
-    var missingLocations: [String] { locations.filter { !ClutterLocations.exists($0) } }
+    var missingLocations: [String] { locations.filter { !locationStatus.isAvailable($0) } }
+
+    /// Mounted volumes (from the last probe).
+    var volumes: [ClutterLocationOption] { locationStatus.volumes }
+
+    /// Whether a location was available at the last probe (no file-system access).
+    func isLocationAvailable(_ path: String) -> Bool {
+        locationStatus.isAvailable(path)
+    }
+
+    /// Display option for a location (no file-system access).
+    func locationOption(for path: String) -> ClutterLocationOption {
+        locationStatus.option(for: path)
+    }
+
+    /// "Home", "Documents and Photos SSD", "3 locations" (no file-system access).
+    func locationSummary(_ paths: [String]) -> String {
+        ClutterLocations.summary(titles: paths.map { locationOption(for: $0).title })
+    }
 
     /// Whether the scan the orb would start can run.
     var canStartScan: Bool {
@@ -208,11 +232,28 @@ final class ClutterScreenModel {
     /// chosen locations that are currently missing.
     var customLocations: [ClutterLocationOption] {
         let known = Set(ClutterLocations.standard.map(\.id) + volumes.map(\.id))
-        return locations.filter { !known.contains(ClutterLocations.canonical($0)) }.map { ClutterLocations.option(for: $0) }
+        return locations.filter { !known.contains(ClutterLocations.canonical($0)) }.map { locationOption(for: $0) }
     }
 
+    /// Re-probes mounted volumes and the chosen and standard locations on a background
+    /// queue (on appear, on mount/unmount, when the app becomes active and when the chosen
+    /// locations change). One probe runs at a time; requests made meanwhile collapse into
+    /// one follow-up probe, so a disk that stops answering never stalls the UI.
     func refreshVolumes() {
-        volumes = ClutterLocations.volumes()
+        guard !isProbingLocations else {
+            needsLocationProbe = true
+            return
+        }
+        isProbingLocations = true
+        needsLocationProbe = false
+        let paths = locations + ClutterLocations.standard.map(\.path)
+        Task { [weak self] in
+            let status = await ClutterLocations.loadStatus(for: paths)
+            guard let self else { return }
+            self.isProbingLocations = false
+            if self.locationStatus != status { self.locationStatus = status }
+            if self.needsLocationProbe { self.refreshVolumes() }
+        }
     }
 
     /// Lets the user pick folders or disks to scan.

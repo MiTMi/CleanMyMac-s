@@ -38,6 +38,12 @@ struct ClutterRootScreen: View {
             consumePendingTool()
         }
         .onChange(of: model.pendingTool) { _, _ in consumePendingTool() }
+        // Location names, free space and availability are probed off the main thread;
+        // probe again whenever they may have changed.
+        .onChange(of: screen.locations) { _, _ in screen.refreshVolumes() }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            screen.refreshVolumes()
+        }
         .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didMountNotification)) { _ in
             screen.refreshVolumes()
         }

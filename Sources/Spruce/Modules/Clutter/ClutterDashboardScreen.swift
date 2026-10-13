@@ -74,7 +74,7 @@ struct ClutterDashboardScreen: View {
         var parts = ["\(ByteFormat.string(report.distinctBytes)) in total"]
         if report.scannedTools.contains(.largeOld) || report.scannedTools.contains(.duplicates)
             || report.scannedTools.contains(.similarImages) {
-            parts.append("looked in \(ClutterLocations.summary(report.locations))")
+            parts.append("looked in \(screen.locationSummary(report.locations))")
         }
         parts.append("scanned \(report.date.formatted(date: .omitted, time: .shortened))")
         return parts.joined(separator: " · ") + ". Review each group, or pick quick suggestions."
@@ -82,7 +82,7 @@ struct ClutterDashboardScreen: View {
 
     private func emptyMessage(_ report: ClutterScanReport) -> String {
         if report.filesExamined > 0 {
-            return "Spruce looked at \(CountFormat.items(report.filesExamined, singular: "file")) in \(ClutterLocations.summary(report.locations)) and found no large, old, duplicate or similar files."
+            return "Spruce looked at \(CountFormat.items(report.filesExamined, singular: "file")) in \(screen.locationSummary(report.locations)) and found no large, old, duplicate or similar files."
         }
         return "No large, old, duplicate or similar files turned up here."
     }

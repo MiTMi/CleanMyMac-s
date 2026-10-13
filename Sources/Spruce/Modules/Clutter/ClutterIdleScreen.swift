@@ -27,8 +27,9 @@ struct ClutterIdleScreen: View {
 
     private var actionSubtitle: String? {
         if screen.focusTool == .downloads { return "Downloads" }
-        guard !screen.availableLocations.isEmpty else { return nil }
-        return ClutterLocations.summary(screen.availableLocations)
+        let available = screen.availableLocations
+        guard !available.isEmpty else { return nil }
+        return screen.locationSummary(available)
     }
 
     private var notice: String? {
@@ -39,13 +40,15 @@ struct ClutterIdleScreen: View {
         }
         let missing = screen.missingLocations
         guard !missing.isEmpty, screen.focusTool != .downloads else { return nil }
-        let names = missing.map { ClutterLocations.option(for: $0).title }
+        let names = missing.map { screen.locationOption(for: $0).title }
         let list = names.count == 1 ? "“\(names[0])” isn't" : "\(names.count) chosen places aren't"
         return "\(list) available right now, so the scan skips \(names.count == 1 ? "it" : "them")."
     }
 }
 
-/// Chips for the places Clutter scans, plus "Choose Folder…".
+/// Chips for the places Clutter scans, plus "Choose Folder…". Names, free space and
+/// availability come from the screen's last location probe (never from the disk while
+/// rendering).
 struct ClutterLocationPicker: View {
     @Bindable var screen: ClutterScreenModel
     @Environment(\.colorSchemeContrast) private var contrast
@@ -62,7 +65,7 @@ struct ClutterLocationPicker: View {
                 ClutterFlowLayout(spacing: 6, lineSpacing: 6) {
                     ForEach(ClutterLocations.standard) { option in
                         ClutterLocationChip(option: option, isSelected: screen.isLocationSelected(option),
-                                            isAvailable: ClutterLocations.exists(option.path),
+                                            isAvailable: screen.isLocationAvailable(option.path),
                                             onTap: { screen.toggleLocation(option) }, onRemove: nil)
                     }
                     ForEach(screen.volumes) { option in
@@ -72,7 +75,7 @@ struct ClutterLocationPicker: View {
                     }
                     ForEach(screen.customLocations) { option in
                         ClutterLocationChip(option: option, isSelected: true,
-                                            isAvailable: ClutterLocations.exists(option.path),
+                                            isAvailable: screen.isLocationAvailable(option.path),
                                             onTap: { screen.removeLocation(option.path) },
                                             onRemove: { screen.removeLocation(option.path) })
                     }

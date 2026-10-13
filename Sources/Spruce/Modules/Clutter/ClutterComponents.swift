@@ -29,26 +29,31 @@ final class ClutterThumbnailCache {
         let cacheKey = key(path, side)
         if let hit = cache.object(forKey: cacheKey as NSString) { return hit }
         if unavailable.contains(cacheKey) { return nil }
-        guard FileManager.default.fileExists(atPath: path) else { return nil }
-        let image = await Self.generate(path: path, side: side, scale: scale)
-        if let image {
+        let result = await Self.generate(path: path, side: side, scale: scale)
+        guard result.exists else { return nil }
+        if let image = result.image {
             cache.setObject(image, forKey: cacheKey as NSString)
         } else {
             unavailable.insert(cacheKey)
         }
-        return image
+        return result.image
     }
 
-    private nonisolated static func generate(path: String, side: CGFloat, scale: CGFloat) async -> NSImage? {
+    /// Runs off the main actor, including the existence check: a file on a disk that
+    /// stopped answering (a sleeping NAS, a stale SMB mount) must not stall the UI.
+    private nonisolated static func generate(path: String, side: CGFloat,
+                                             scale: CGFloat) async -> (exists: Bool, image: NSImage?) {
+        guard FileManager.default.fileExists(atPath: path) else { return (false, nil) }
         let request = QLThumbnailGenerator.Request(fileAt: URL(fileURLWithPath: path),
                                                    size: CGSize(width: side, height: side),
                                                    scale: max(scale, 1),
                                                    representationTypes: .thumbnail)
-        return await withCheckedContinuation { (continuation: CheckedContinuation<NSImage?, Never>) in
+        let image = await withCheckedContinuation { (continuation: CheckedContinuation<NSImage?, Never>) in
             QLThumbnailGenerator.shared.generateBestRepresentation(for: request) { representation, _ in
                 continuation.resume(returning: representation?.nsImage)
             }
         }
+        return (true, image)
     }
 }
 
