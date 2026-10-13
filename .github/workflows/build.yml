@@ -12,7 +12,8 @@ defaults:
 
 concurrency:
   group: build-${{ github.ref }}
-  cancel-in-progress: true
+  # Let a running build finish (each run gives a verdict); GitHub keeps only the newest pending run.
+  cancel-in-progress: false
 
 jobs:
   macos:
