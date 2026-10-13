@@ -23,12 +23,26 @@ enum MonitorTheme {
     static let networkUpTint = ModuleID.spaceMap.palette.accent2
     static let powerTint = ModuleID.activity.palette.accent
     static let devicesTint = ModuleID.applications.palette.accentText
+    static let protectionTint = ModuleID.protection.palette.accentText
 
     static func color(for status: MonitorHealthStatus) -> Color {
         switch status {
         case .good: return StatusColor.success
         case .attention: return StatusColor.warning
         case .critical: return StatusColor.danger
+        }
+    }
+
+    /// Status dot / ring colour for the app's Mac Health report, matching the sidebar pill
+    /// (Excellent and Good are fine, Fair and Needs Attention amber, Critical red). A
+    /// critical suggestion (a threat, a failing or full disk…) turns it red whatever the score.
+    static func status(for report: ActivityHealthReport) -> MonitorHealthStatus {
+        guard report.isRated else { return .good }
+        if report.recommendations.contains(where: { $0.severity == .critical }) { return .critical }
+        switch report.level {
+        case .excellent, .good: return .good
+        case .fair, .requiresAttention: return .attention
+        case .critical: return .critical
         }
     }
 
@@ -258,17 +272,21 @@ struct MonitorPressureGauge: View {
     }
 }
 
-/// Health score ring with a sweep on open (B.9: 0.9 s).
+/// Mac Health score ring with a sweep on open (B.9: 0.9 s).
 @MainActor
 struct MonitorHealthRing: View {
-    var health: MonitorHealth
+    var score: Int
+    var isRated: Bool
+    var status: MonitorHealthStatus
+    /// Band name for VoiceOver ("Good").
+    var label: String
 
     @State private var appeared = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        let color = MonitorTheme.color(for: health.status)
-        let target = health.isRated ? CGFloat(health.score) / 100 : 0
+        let color = MonitorTheme.color(for: status)
+        let target = isRated ? CGFloat(min(max(score, 0), 100)) / 100 : 0
         ZStack {
             Circle()
                 .inset(by: 2.5)
@@ -279,7 +297,7 @@ struct MonitorHealthRing: View {
                 .stroke(color, style: StrokeStyle(lineWidth: 5, lineCap: .round))
                 .rotationEffect(.degrees(-90))
                 .shadow(color: color.opacity(0.45), radius: 4)
-            Text(health.isRated ? "\(health.score)" : "–")
+            Text(isRated ? "\(score)" : "–")
                 .font(.system(size: 15, weight: .semibold, design: .rounded).monospacedDigit())
                 .foregroundStyle(Ink.primary)
                 .contentTransition(.numericText())
@@ -290,8 +308,8 @@ struct MonitorHealthRing: View {
             withAnimation(reduceMotion ? nil : Motion.countUp) { appeared = true }
         }
         .accessibilityElement()
-        .accessibilityLabel("Health score")
-        .accessibilityValue(health.isRated ? "\(health.score) of 100, \(health.status.label)" : "Not rated yet")
+        .accessibilityLabel("Mac Health score")
+        .accessibilityValue(isRated ? "\(score) of 100, \(label)" : "Not rated yet")
     }
 }
 

@@ -162,26 +162,49 @@ enum MonitorDiskProbe {
                                   purgeable: MonitorDiskMath.purgeable(importantAvailable: available, available: free))
     }
 
-    /// Size of the user's Trash on every mounted volume. Returns nil when
-    /// `~/.Trash` cannot be listed (macOS requires Full Disk Access for it).
-    static func trashSize() -> Int64? {
+    /// The user's Trash folders: `~/.Trash` and `.Trashes/<uid>` on every other mounted
+    /// volume that has one.
+    static func trashFolders() -> [String] {
+        let fileManager = FileManager.default
+        var folders = [NSHomeDirectory() + "/.Trash"]
+        let uid = String(getuid())
+        let volumes = fileManager.mountedVolumeURLs(includingResourceValuesForKeys: nil, options: [.skipHiddenVolumes]) ?? []
+        for volume in volumes where volume.path != "/" {
+            let path = volume.appendingPathComponent(".Trashes").appendingPathComponent(uid).path
+            if fileManager.fileExists(atPath: path) { folders.append(path) }
+        }
+        return folders
+    }
+
+    /// Modification dates of the Trash folders (a `stat` each; no listing, so it works
+    /// without Full Disk Access and costs next to nothing).
+    static func trashSignature(_ folders: [String]) -> MonitorTrashSignature {
+        var stamps: [String: Double] = [:]
+        for folder in folders {
+            var info = stat()
+            guard stat(folder, &info) == 0 else { continue }
+            stamps[folder] = Double(info.st_mtimespec.tv_sec) + Double(info.st_mtimespec.tv_nsec) / 1_000_000_000
+        }
+        return MonitorTrashSignature(stamps: stamps)
+    }
+
+    /// Size of the user's Trash on every mounted volume. `.needsAccess` when `~/.Trash`
+    /// cannot be listed (macOS requires Full Disk Access for it). A walk that runs past
+    /// 20 s reports what it counted so far.
+    static func trashStatus(_ folders: [String]) -> MonitorTrashStatus {
         let fileManager = FileManager.default
         let deadline = Date().addingTimeInterval(20)
         let home = NSHomeDirectory() + "/.Trash"
         var total: Int64 = 0
-        if fileManager.fileExists(atPath: home) {
-            guard (try? fileManager.contentsOfDirectory(atPath: home)) != nil else { return nil }
-            total += DiskUsage.measure(home, deadline: deadline).bytes
+        for folder in folders {
+            guard fileManager.fileExists(atPath: folder) else { continue }
+            guard (try? fileManager.contentsOfDirectory(atPath: folder)) != nil else {
+                if folder == home { return .needsAccess }
+                continue
+            }
+            total += DiskUsage.measure(folder, deadline: deadline).bytes
         }
-        let uid = getuid()
-        let volumes = fileManager.mountedVolumeURLs(includingResourceValuesForKeys: nil, options: [.skipHiddenVolumes]) ?? []
-        for volume in volumes where volume.path != "/" {
-            let path = volume.appendingPathComponent(".Trashes").appendingPathComponent(String(uid)).path
-            guard fileManager.fileExists(atPath: path),
-                  (try? fileManager.contentsOfDirectory(atPath: path)) != nil else { continue }
-            total += DiskUsage.measure(path, deadline: deadline).bytes
-        }
-        return total
+        return .measured(total)
     }
 }
 

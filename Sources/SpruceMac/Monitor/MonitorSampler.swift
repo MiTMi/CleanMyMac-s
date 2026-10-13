@@ -10,7 +10,6 @@ struct MonitorSample: Sendable {
     var coreCount = 0
     var memory: MonitorMemoryReading?
     var disk: MonitorDiskReading?
-    var trash: MonitorTrashStatus?
     var network: MonitorNetworkRates?
     var powerSampled = false
     var power: MonitorPowerInfo?
@@ -26,7 +25,9 @@ struct MonitorSample: Sendable {
     }
 }
 
-/// Owns all sampling state. Used only on `SystemMonitor`'s private serial queue.
+/// Owns all sampling state. Used only on `SystemMonitor`'s private serial queue. Nothing
+/// here may block for long: the Trash walk, disk health and external drives run on their
+/// own queues (`MonitorTrashWatcher`, `MonitorStorageProbes.swift`).
 final class MonitorSampler: @unchecked Sendable {
     /// `mach_host_self()` returns a new send right on every call, so cache it.
     private let host: mach_port_t = mach_host_self()
@@ -38,7 +39,6 @@ final class MonitorSampler: @unchecked Sendable {
     private var lastDisk = Date.distantPast
     private var lastPower = Date.distantPast
     private var lastDevices = Date.distantPast
-    private var lastTrash = Date.distantPast
     private var resolvedComputerName = false
 
     /// Takes the 2-second readings, plus the slower ones when they are due.
@@ -78,10 +78,6 @@ final class MonitorSampler: @unchecked Sendable {
             sample.devices = MonitorPowerProbe.devices()
             lastDevices = now
         }
-        let trashAge = now.timeIntervalSince(lastTrash)
-        if trashAge >= (force ? MonitorSampling.trashMinimumRefresh : MonitorSampling.trashInterval) {
-            sample.trash = measureTrash()
-        }
 
         sample.loadAverage = MonitorSystemProbe.loadAverage()
         sample.uptime = MonitorSystemProbe.uptime(now: now)
@@ -91,13 +87,6 @@ final class MonitorSampler: @unchecked Sendable {
             sample.computerName = Host.current().localizedName
         }
         return sample
-    }
-
-    /// Measures the Trash now (after emptying it, or on the regular cadence).
-    func measureTrash() -> MonitorTrashStatus {
-        lastTrash = Date()
-        if let bytes = MonitorDiskProbe.trashSize() { return .measured(bytes) }
-        return .needsAccess
     }
 
     /// A one-off memory reading (Free Up compares before and after).

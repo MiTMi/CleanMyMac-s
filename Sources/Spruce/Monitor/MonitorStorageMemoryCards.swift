@@ -5,7 +5,8 @@ import SwiftUI
 
 // MARK: - Storage
 
-/// Startup-disk availability, Trash size with Empty Trash, and Clean Up.
+/// Startup-disk availability and condition (SMART, life left, temperature), Trash size
+/// with Empty Trash, and Clean Up.
 @MainActor
 struct MonitorStorageCard: View {
     var monitor: SystemMonitor
@@ -29,6 +30,9 @@ struct MonitorStorageCard: View {
             } else {
                 MonitorPlaceholderLine(text: "Reading the startup disk…")
             }
+            if let health = monitor.diskHealth, health.hasDetails {
+                MonitorDiskHealthLine(health: health, inCelsius: settings.settings.temperatureUnitCelsius)
+            }
             Rectangle().fill(Ink.hairline).frame(height: 1)
             trashRow
             if let note {
@@ -40,6 +44,7 @@ struct MonitorStorageCard: View {
     }
 
     private func diskStatus(_ snap: SystemSnapshot) -> MonitorHealthStatus {
+        if monitor.diskHealth?.isFailing == true { return .critical }
         guard snap.diskTotal > 0 else { return .good }
         if MonitorDiskMath.isCritical(available: snap.diskAvailable, total: snap.diskTotal) { return .critical }
         let percent = MonitorDiskMath.freePercent(available: snap.diskAvailable, total: snap.diskTotal)
@@ -169,6 +174,32 @@ struct MonitorStorageCard: View {
             try? await Task.sleep(nanoseconds: 5_000_000_000)
             if note?.id == value.id { note = nil }
         }
+    }
+}
+
+/// "Disk health: Healthy · 98% life left · 38 °C", or a red warning when SMART reports
+/// the startup disk as failing.
+@MainActor
+struct MonitorDiskHealthLine: View {
+    var health: MonitorDiskHealth
+    var inCelsius: Bool
+
+    var body: some View {
+        let failing = health.isFailing
+        let verified = health.condition == .verified
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Image(systemName: failing ? "exclamationmark.triangle.fill" : (verified ? "checkmark.seal.fill" : "thermometer.medium"))
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(failing ? StatusColor.danger : (verified ? StatusColor.success : Ink.tertiary))
+            Text(failing ? "The startup disk reports it is failing. Back up your data now."
+                         : "Disk health: \(health.summary(inCelsius: inCelsius))")
+                .font(failing ? SpruceFont.caption.weight(.semibold) : SpruceFont.caption)
+                .foregroundStyle(failing ? StatusColor.danger : Ink.tertiary)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .help("Condition reported by the startup disk (SMART)")
+        .accessibilityElement(children: .combine)
     }
 }
 

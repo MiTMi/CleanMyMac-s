@@ -182,6 +182,24 @@ public enum MonitorFormat {
         return remHours == 0 ? "\(days) d" : "\(days) d \(remHours) h"
     }
 
+    /// Time since an event, compact: "just now", "12 min ago", "3 h ago", "2 d ago".
+    public static func ago(_ seconds: TimeInterval) -> String {
+        let total = seconds.isFinite ? Int(max(0, seconds)) : 0
+        if total < 60 { return "just now" }
+        let minutes = total / 60
+        if minutes < 60 { return "\(minutes) min ago" }
+        let hours = minutes / 60
+        if hours < 24 { return "\(hours) h ago" }
+        return "\(hours / 24) d ago"
+    }
+
+    /// "38 °C" or "100 °F" from degrees Celsius.
+    public static func temperature(_ celsius: Double, inCelsius: Bool = true) -> String {
+        let value = celsius.isFinite ? celsius : 0
+        if inCelsius { return "\(Int(value.rounded())) °C" }
+        return "\(Int((value * 9 / 5 + 32).rounded())) °F"
+    }
+
     /// "3:05" for 185 minutes.
     public static func hoursMinutes(_ minutes: Int) -> String {
         let m = max(0, minutes)

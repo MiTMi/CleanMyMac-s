@@ -29,6 +29,8 @@ public enum MonitorHealthStatus: String, Sendable, Codable, Comparable, CaseIter
 public struct MonitorIssue: Sendable, Equatable, Identifiable {
     public enum Kind: String, Sendable, Codable {
         case disk, memory, swap, thermal, cpu, battery, trash
+        /// The startup disk reports a failing SMART status.
+        case diskHealth
     }
 
     public var kind: Kind
@@ -57,6 +59,7 @@ public struct MonitorIssue: Sendable, Equatable, Identifiable {
         case .cpu: return "cpu"
         case .battery: return "battery.25percent"
         case .trash: return "trash"
+        case .diskHealth: return "exclamationmark.triangle.fill"
         }
     }
 }
@@ -71,19 +74,24 @@ public struct MonitorHealthContext: Sendable, Equatable {
     public var trashKnown: Bool
     /// True when CPU load has been very high for the last minute.
     public var sustainedHighCPU: Bool
+    /// True when the startup disk reports a failing SMART status (`diskutil info`).
+    public var diskFailing: Bool
 
     public init(lowDiskThresholdPercent: Int = 10, trashThreshold: Int64 = 2_000_000_000,
-                trashKnown: Bool = false, sustainedHighCPU: Bool = false) {
+                trashKnown: Bool = false, sustainedHighCPU: Bool = false, diskFailing: Bool = false) {
         self.lowDiskThresholdPercent = lowDiskThresholdPercent
         self.trashThreshold = trashThreshold
         self.trashKnown = trashKnown
         self.sustainedHighCPU = sustainedHighCPU
+        self.diskFailing = diskFailing
     }
 }
 
 /// A live health rating derived from the latest snapshot: 100 minus a penalty for
-/// each active issue. It reflects the machine's state *right now* (storage, memory,
-/// heat, load, battery), so it moves as conditions change.
+/// each active issue. It reflects the machine's state *right now* (storage, disk
+/// condition, memory, heat, load, battery), so it moves as conditions change. It is the
+/// system part of the app's Mac Health score (`AppModel.healthReport`), which the menu
+/// header shows; these issues are its detail lines.
 public struct MonitorHealth: Sendable, Equatable {
     public var score: Int
     public var status: MonitorHealthStatus
@@ -127,6 +135,12 @@ public struct MonitorHealth: Sendable, Equatable {
                 issues.append(MonitorIssue(kind: .disk, severity: .attention, title: "Startup disk is getting full",
                                            detail: "\(free) available (\(Int(percent.rounded()))%)", penalty: 20))
             }
+        }
+
+        // Disk condition: a failing drive can lose everything on it, so it outranks space.
+        if context.diskFailing {
+            issues.append(MonitorIssue(kind: .diskHealth, severity: .critical, title: "Startup disk is failing",
+                                       detail: "Back up your data now", penalty: 40))
         }
 
         // Memory

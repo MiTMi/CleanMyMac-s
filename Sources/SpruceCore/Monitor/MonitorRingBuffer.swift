@@ -12,11 +12,24 @@ public enum MonitorSampling {
     public static let powerInterval: TimeInterval = 10
     /// Bluetooth peripheral batteries (IORegistry walk).
     public static let devicesInterval: TimeInterval = 30
-    /// Trash size (a directory walk; needs Full Disk Access).
-    public static let trashInterval: TimeInterval = 60
-    /// A forced refresh (menu opened) re-measures the Trash only when the last
-    /// reading is older than this.
-    public static let trashMinimumRefresh: TimeInterval = 15
+    /// How often the Trash folders' modification dates are checked (a few `stat`s). The
+    /// Trash is only walked again when one of them changed — see `MonitorTrashSchedule`.
+    public static let trashCheckInterval: TimeInterval = 10
+    /// A Trash that could not be listed (no Full Disk Access) is retried this often; the
+    /// attempt fails at once, so it costs nothing until access is granted.
+    public static let trashAccessRetry: TimeInterval = 60
+    /// A forced refresh (menu opened) re-walks an unchanged Trash only when the last
+    /// measurement is older than this.
+    public static let trashForcedRefresh: TimeInterval = 600
+    /// An unchanged Trash is re-walked at most this often anyway, to catch changes deep
+    /// inside trashed folders (they don't touch the top-level folder's date).
+    public static let trashMaximumAge: TimeInterval = 3600
+    /// The startup disk's SMART status and temperature (`diskutil info`, two short processes).
+    public static let diskHealthInterval: TimeInterval = 1800
+    /// A forced refresh re-reads disk health when the last reading is older than this.
+    public static let diskHealthForcedRefresh: TimeInterval = 120
+    /// Mounted external drives (also refreshed on every mount and unmount).
+    public static let volumesInterval: TimeInterval = 30
 }
 
 /// Fixed-capacity FIFO holding the most recent samples; the oldest is dropped first.

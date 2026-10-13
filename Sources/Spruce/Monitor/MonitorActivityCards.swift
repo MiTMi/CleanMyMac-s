@@ -226,28 +226,158 @@ struct MonitorPowerCard: View {
 
 // MARK: - Devices
 
-/// Accessories that report a battery level, low battery (< 20 %) first and in red.
+/// Accessories that report a battery level (low battery, < 20 %, first and in red), then
+/// mounted external drives with free space and Eject (Eject All when there are several).
 @MainActor
 struct MonitorDevicesCard: View {
-    var devices: [MonitorDevice]
+    var monitor: SystemMonitor
 
-    private let visibleLimit = 4
+    @State private var note: MonitorNote?
+    @State private var ejectingAll = false
+    private let visibleLimit = 3
 
     var body: some View {
+        let devices = monitor.devices
+        let volumes = monitor.volumes
         let lowCount = devices.filter(\.isLowBattery).count
-        MonitorCard(title: "Devices", symbol: "dot.radiowaves.left.and.right",
+        MonitorCard(title: "Devices", symbol: devices.isEmpty ? "externaldrive" : "dot.radiowaves.left.and.right",
                     tint: lowCount > 0 ? StatusColor.danger : MonitorTheme.devicesTint) {
-            VStack(alignment: .leading, spacing: 6) {
-                ForEach(Array(devices.prefix(visibleLimit))) { device in
-                    MonitorDeviceRow(device: device)
+            if volumes.count > 1 {
+                ejectAllButton
+            }
+        } content: {
+            if !devices.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(Array(devices.prefix(visibleLimit))) { device in
+                        MonitorDeviceRow(device: device)
+                    }
+                }
+                if devices.count > visibleLimit {
+                    Text("+\(devices.count - visibleLimit) more")
+                        .font(SpruceFont.caption)
+                        .foregroundStyle(Ink.tertiary)
                 }
             }
-            if devices.count > visibleLimit {
-                Text("+\(devices.count - visibleLimit) more")
-                    .font(SpruceFont.caption)
-                    .foregroundStyle(Ink.tertiary)
+            if !devices.isEmpty && !volumes.isEmpty {
+                Rectangle().fill(Ink.hairline).frame(height: 1)
+            }
+            if !volumes.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(volumes) { volume in
+                        MonitorVolumeRow(volume: volume,
+                                         isEjecting: ejectingAll || monitor.ejectingVolumes.contains(volume.id)) {
+                            eject(volume)
+                        }
+                    }
+                }
+            }
+            if let note {
+                MonitorNoteView(note: note)
             }
         }
+        .animation(Motion.standard, value: note)
+        .animation(Motion.standard, value: volumes.map(\.id))
+    }
+
+    private var ejectAllButton: some View {
+        Button {
+            ejectAll()
+        } label: {
+            Label("Eject All", systemImage: "eject")
+                .font(SpruceFont.caption.weight(.medium))
+                .foregroundStyle(ejectingAll ? Ink.disabled : Ink.secondary)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(PrismPressStyle(pressedScale: 0.95))
+        .disabled(ejectingAll)
+        .help("Eject every external drive")
+    }
+
+    private func eject(_ volume: MonitorVolume) {
+        Task {
+            switch await monitor.eject(volume) {
+            case .ejected:
+                show(.success("Ejected \u{201C}\(volume.name)\u{201D}. It's safe to unplug."))
+            case .failed(let message):
+                show(.failure(message))
+                SpruceSound.play(.error, force: true)
+            }
+        }
+    }
+
+    private func ejectAll() {
+        ejectingAll = true
+        Task {
+            let count = monitor.volumes.count
+            let failures = await monitor.ejectAll()
+            ejectingAll = false
+            if let first = failures.first {
+                show(.failure(failures.count == 1 ? first : "\(failures.count) drives couldn't be ejected. \(first)"))
+                SpruceSound.play(.error, force: true)
+            } else {
+                show(.success(count == 1 ? "Ejected 1 drive. It's safe to unplug." : "Ejected \(count) drives. They're safe to unplug."))
+            }
+        }
+    }
+
+    private func show(_ value: MonitorNote) {
+        note = value
+        Task {
+            try? await Task.sleep(nanoseconds: 6_000_000_000)
+            if note?.id == value.id { note = nil }
+        }
+    }
+}
+
+/// "Backup ……… 312 GB free of 1 TB  ⏏" with a thin used-space bar.
+@MainActor
+struct MonitorVolumeRow: View {
+    var volume: MonitorVolume
+    var isEjecting: Bool
+    var onEject: () -> Void
+
+    var body: some View {
+        HStack(spacing: Spacing.s) {
+            Image(systemName: volume.symbol)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(Ink.secondary)
+                .frame(width: 18)
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Text(volume.name)
+                        .font(SpruceFont.callout)
+                        .foregroundStyle(Ink.primary.opacity(0.9))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Spacer(minLength: 6)
+                    Text(volume.capacityText)
+                        .font(SpruceFont.captionDigits)
+                        .foregroundStyle(Ink.tertiary)
+                        .lineLimit(1)
+                }
+                MonitorBar(segments: [MonitorBarSegment(id: "used", fraction: volume.usedFraction,
+                                                        color: MonitorTheme.storageTint)], height: 4)
+            }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("\(volume.name), \(volume.capacityText)")
+            if isEjecting {
+                ProgressView()
+                    .controlSize(.small)
+                    .frame(width: 22, height: 22)
+            } else {
+                Button(action: onEject) {
+                    Image(systemName: "eject.fill")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Ink.secondary)
+                        .frame(width: 22, height: 22)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(PrismPressStyle(pressedScale: 0.9))
+                .help("Eject \u{201C}\(volume.name)\u{201D}")
+                .accessibilityLabel("Eject \(volume.name)")
+            }
+        }
+        .accessibilityElement(children: .contain)
     }
 }
 
