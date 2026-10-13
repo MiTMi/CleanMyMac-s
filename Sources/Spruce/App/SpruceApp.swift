@@ -30,8 +30,8 @@ struct SpruceApp: App {
         .defaultSize(width: 820, height: 600)
 
         MenuBarExtra(isInserted: Binding(
-            get: { model.settings.settings.showMenuBarMonitor },
-            set: { model.settings.settings.showMenuBarMonitor = $0 }
+            get: { model.settings.showMenuBarMonitor },
+            set: { model.settings.showMenuBarMonitor = $0 }
         )) {
             MonitorMenuView()
                 .environment(model)

@@ -1559,6 +1559,8 @@ struct ScanFlowScreen: View {
     @State private var scanStartedAt: Date?
     /// Scan › Run Selected… asks here first (the orb runs directly).
     @State private var confirmMenuRun = false
+    /// Keeps this screen's menu actions apart from an earlier instance's (see `SpruceFlowActions`).
+    @State private var menuInstance = UUID()
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
@@ -1593,6 +1595,7 @@ struct ScanFlowScreen: View {
     /// Scan and Edit menu actions; Run Selected… only opens the confirmation above.
     private var menuActions: SpruceFlowActions {
         var actions = flow.menuActions
+        actions.context += ".\(menuInstance)"
         if flow.phase == .results && flow.selectedCount > 0 {
             actions.reviewAndRun = { confirmMenuRun = true }
         }

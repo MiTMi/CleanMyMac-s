@@ -18,9 +18,22 @@ public final class SettingsStore {
         }
         set {
             guard newValue != storage else { return }
+            let menuBarChanged = newValue.showMenuBarMonitor != storage.showMenuBarMonitor
             withMutation(keyPath: \.settings) { storage = newValue }
+            if menuBarChanged { withMutation(keyPath: \.showMenuBarMonitor) {} }
             save()
         }
+    }
+
+    /// The menu bar item's switch, observable on its own. The menu bar item's binding is
+    /// read while SwiftUI updates the app's scenes; reading `settings` there would rebuild
+    /// the whole main menu on every settings change.
+    public var showMenuBarMonitor: Bool {
+        get {
+            access(keyPath: \.showMenuBarMonitor)
+            return storage.showMenuBarMonitor
+        }
+        set { settings.showMenuBarMonitor = newValue }
     }
 
     @ObservationIgnored private var storage: SpruceSettings

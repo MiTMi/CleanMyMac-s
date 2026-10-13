@@ -23,6 +23,13 @@ struct RootView: View {
         .animation(Motion.canvas, value: model.selection)
         .onAppear {
             model.registerWindowOpener(openWindow)
+        }
+        .task {
+            // Open the welcome guide once the window is on screen. Presented during the
+            // window's first update, the sheet's slide-in runs a nested run loop that the
+            // rest of launch (menu bar, first frames) then happens inside.
+            guard !model.settings.settings.hasCompletedOnboarding else { return }
+            try? await Task.sleep(for: .milliseconds(350))
             showOnboarding = !model.settings.settings.hasCompletedOnboarding
         }
         .sheet(isPresented: $showOnboarding) {

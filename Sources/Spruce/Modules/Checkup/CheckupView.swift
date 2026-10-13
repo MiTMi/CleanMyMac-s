@@ -15,6 +15,9 @@ struct CheckupView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// Scan › Run Selected… asks here first (the Run orb runs directly).
     @State private var confirmMenuRun = false
+    /// Tells this view's menu actions apart from those of an earlier CheckupView still
+    /// fading out (equal menu actions keep their first closures; see `SpruceFlowActions`).
+    @State private var menuInstance = UUID()
     private var session: CheckupSession { CheckupSession.shared }
 
     init() {}
@@ -50,7 +53,7 @@ struct CheckupView: View {
     /// prompt is open.
     private var menuActions: SpruceFlowActions {
         var actions = SpruceFlowActions()
-        actions.context = "checkup"
+        actions.context = "checkup.\(menuInstance).\(String(describing: session.phase))"
         let modules = model.settings.settings.checkupModules
         switch session.phase {
         case .idle, .done:
