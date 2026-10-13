@@ -55,9 +55,10 @@ affiliated with MacPaw.
 1. Open the repository's **Actions** tab, pick the latest green **Build** run on the
    `claude/brave-ptolemy-jnm0it` branch, and download the **Spruce-app** artifact.
 2. Unzip it and drag **Spruce.app** to `/Applications`.
-3. CI builds are ad-hoc signed (not notarized), so the first launch needs:
-   right-click **Spruce.app → Open → Open**, or run
-   `xattr -dr com.apple.quarantine /Applications/Spruce.app`.
+3. CI builds are ad-hoc signed (not notarized), so macOS blocks the first launch. Try to
+   open it once, then go to **System Settings › Privacy & Security** and click **Open
+   Anyway** (on macOS 14 you can also right-click **Spruce.app → Open**). Or run
+   `xattr -dr com.apple.quarantine /Applications/Spruce.app` before opening it.
 
 ### Option B — build it yourself
 
@@ -81,7 +82,11 @@ itself, to Apple's notary service; your certificate never leaves your Mac.
 **One-time setup** (about 10 minutes):
 
 1. **Certificate** — Xcode › Settings › Accounts › select your team › **Manage
-   Certificates…** › **+** › **Developer ID Application**. Check it is there:
+   Certificates…** › **+** › **Developer ID Application**. This needs the *Account
+   Holder* role (an individual membership is). If you already have a Developer ID
+   Application certificate on another Mac, export it there as a `.p12` and import it here
+   instead of creating a new one (Apple allows only a few), and keep a backup of the
+   `.p12`. Check it is there:
    ```bash
    security find-identity -v -p codesigning     # shows "Developer ID Application: …"
    ```
@@ -108,9 +113,12 @@ itself, to Apple's notary service; your certificate never leaves your Mac.
 Then drag `build/Spruce.app` to `/Applications`, replacing the previous copy. The first
 time, macOS asks whether `codesign` may use your signing key: choose **Always Allow**.
 
-Options: `NOTARIZE=0` signs without notarizing (faster for quick local tests);
-`SIGN_IDENTITY="Developer ID Application: …"` picks a certificate if you have several;
-`NOTARY_PROFILE=name` uses differently named credentials. Without a developer account
+Signing and notarizing need an internet connection. Options: `NOTARIZE=0` signs with
+your certificate but skips the timestamp and notarization (works offline; fine for builds
+you only run yourself); `SIGN_IDENTITY=<SHA-1>` picks a certificate when you have several
+— use the 40-character hash that `security find-identity -v -p codesigning` prints, since
+a renewed certificate has the same name as the old one; `SIGN_IDENTITY=-` forces an
+ad-hoc signature; `NOTARY_PROFILE=name` uses differently named credentials. Without a developer account
 you can still keep permissions across rebuilds with a self-signed certificate (Keychain
 Access › Certificate Assistant › Create a Certificate…, type *Code Signing*) and
 `SIGN_IDENTITY="<its name>" ./scripts/build-app.sh` — it just won't be notarized.

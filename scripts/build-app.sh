@@ -37,7 +37,7 @@ swift build -c release --product "$APP_NAME" "${ARCH_FLAGS[@]+"${ARCH_FLAGS[@]}"
 BIN_DIR="$(swift build -c release --product "$APP_NAME" "${ARCH_FLAGS[@]+"${ARCH_FLAGS[@]}"}" --show-bin-path)"
 
 echo "==> Assembling $APP"
-rm -rf "$APP"
+rm -rf "$APP" "$OUT/$APP_NAME.zip"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN_DIR/$APP_NAME" "$APP/Contents/MacOS/$APP_NAME"
 
@@ -89,7 +89,7 @@ SIGN_NAME="${SIGN_NAME:-$SIGN_IDENTITY}"
 # Is the chosen identity (given as a SHA-1 or a name) a Developer ID certificate?
 IS_DEVELOPER_ID=0
 if [[ "$SIGN_IDENTITY" != "-" ]]; then
-  IDENTITY_LINES="$(grep -F -- "$SIGN_IDENTITY" <<<"$IDENTITIES" || true)"
+  IDENTITY_LINES="$(grep -iF -- "$SIGN_IDENTITY" <<<"$IDENTITIES" || true)"
   if [[ "$IDENTITY_LINES" == *'"Developer ID Application:'* ]]; then
     IS_DEVELOPER_ID=1
   fi
@@ -98,10 +98,14 @@ fi
 if [[ "$SIGN_IDENTITY" == "-" ]]; then
   echo "==> Signing ad-hoc (no Developer ID certificate in use)"
   TIMESTAMP_FLAG="--timestamp=none"
-elif [[ "$IS_DEVELOPER_ID" == "1" ]]; then
+elif [[ "$IS_DEVELOPER_ID" == "1" && "${NOTARIZE:-1}" != "0" ]]; then
   echo "==> Signing with $SIGN_NAME"
-  # Notarization requires the hardened runtime and a secure timestamp from Apple.
+  # Notarization requires the hardened runtime and a secure timestamp from Apple
+  # (timestamp.apple.com, so this step needs the network).
   TIMESTAMP_FLAG="--timestamp"
+elif [[ "$IS_DEVELOPER_ID" == "1" ]]; then
+  echo "==> Signing with $SIGN_NAME (NOTARIZE=0: no timestamp, not notarized)"
+  TIMESTAMP_FLAG="--timestamp=none"
 else
   echo "==> Signing with $SIGN_NAME (not a Developer ID certificate; it won't be notarized)"
   TIMESTAMP_FLAG="--timestamp=none"
@@ -118,13 +122,23 @@ codesign --verify --strict --verbose=2 "$APP"
 NOTARY_PROFILE="${NOTARY_PROFILE:-spruce-notary}"
 NOTARIZED=0
 if [[ "$IS_DEVELOPER_ID" == "1" && "${NOTARIZE:-1}" != "0" ]]; then
-  if ! xcrun notarytool history --keychain-profile "$NOTARY_PROFILE" >/dev/null 2>&1; then
+  NOTARY_CHECK_OK=1
+  NOTARY_CHECK="$(xcrun notarytool history --keychain-profile "$NOTARY_PROFILE" 2>&1)" || NOTARY_CHECK_OK=0
+  if [[ "$NOTARY_CHECK_OK" == "0" ]] && grep -qiE "no keychain password item found|could not find|not found in keychain" <<<"$NOTARY_CHECK"; then
     echo "warning: no notarization credentials named \"$NOTARY_PROFILE\" in your keychain — skipping notarization." >&2
     echo "         Store them once with: xcrun notarytool store-credentials $NOTARY_PROFILE ...  (see README)" >&2
+  elif [[ "$NOTARY_CHECK_OK" == "0" ]]; then
+    # The profile exists but Apple's notary service refused or couldn't be reached
+    # (offline, revoked app-specific password or API key, agreement to accept, …).
+    echo "error: Apple's notary service didn't accept the stored credentials \"$NOTARY_PROFILE\":" >&2
+    sed 's/^/         /' <<<"$NOTARY_CHECK" >&2
+    echo "         The app in $APP is signed but not notarized. Fix the above, or build with NOTARIZE=0." >&2
+    exit 1
   else
     echo "==> Notarizing with Apple (this usually takes a minute or two)"
     SUBMIT_ZIP="$OUT/$APP_NAME-notarize.zip"
     rm -f "$SUBMIT_ZIP"
+    trap 'rm -f "$SUBMIT_ZIP"' EXIT
     ditto -c -k --keepParent "$APP" "$SUBMIT_ZIP"
     SUBMIT_LOG="$OUT/notarize.log"
     if ! xcrun notarytool submit "$SUBMIT_ZIP" --keychain-profile "$NOTARY_PROFILE" --wait 2>&1 | tee "$SUBMIT_LOG"; then
@@ -133,7 +147,7 @@ if [[ "$IS_DEVELOPER_ID" == "1" && "${NOTARIZE:-1}" != "0" ]]; then
     fi
     rm -f "$SUBMIT_ZIP"
     if ! grep -q "status: Accepted" "$SUBMIT_LOG"; then
-      SUBMISSION_ID="$(grep -m1 -E '^[[:space:]]*id:' "$SUBMIT_LOG" | awk '{print $2}')"
+      SUBMISSION_ID="$(awk '/^[[:space:]]*id:/ {print $2; exit}' "$SUBMIT_LOG")"
       echo "error: Apple did not accept the app. Details: xcrun notarytool log ${SUBMISSION_ID:-<id>} --keychain-profile $NOTARY_PROFILE" >&2
       exit 1
     fi
