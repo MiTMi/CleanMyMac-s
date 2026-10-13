@@ -22,7 +22,7 @@ final class YaraRobustnessTests: XCTestCase {
         import "math"
 
         rule ok_first { strings: $a = "fine" condition: $a }
-        rule regex_string { strings: $a = /ev[il]+/i condition: $a }
+        rule regex_string { strings: $a = /(ev)\1/ condition: $a }
         rule uses_regex_rule { condition: regex_string }
         rule uses_uses { condition: uses_regex_rule or true }
         rule pe_module { condition: pe.number_of_sections > 2 }
@@ -47,7 +47,7 @@ final class YaraRobustnessTests: XCTestCase {
         XCTAssertEqual(set.rules.map(\.name), ["ok_first", "ok_last"])
         XCTAssertEqual(set.names(YaraFixture.bytes("all fine")), ["ok_first", "ok_last"])
         let expected: [String: String] = [
-            "regex_string": "regular expression",
+            "regex_string": "regular expression uses \\1",
             "uses_regex_rule": "Uses rule regex_string, which was skipped",
             "uses_uses": "Uses rule uses_regex_rule, which was skipped",
             "pe_module": "pe module",

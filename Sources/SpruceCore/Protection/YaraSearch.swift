@@ -257,6 +257,9 @@ final class YaraSearch {
     /// Matches later pieces of split hex strings may still keep in this scan (all together).
     private var chainPieceSpansLeft: Int
     private(set) var notes: [String] = []
+    /// Per regular-expression plan: the next offset holding one of its required bytes (or
+    /// data.count), from the last start that was looked up.
+    private var requiredNext: [Int: (from: Int, at: Int)] = [:]
 
     init(program: YaraProgram, data: UnsafeBufferPointer<UInt8>, limits: YaraScanLimits) {
         self.program = program
@@ -306,6 +309,10 @@ final class YaraSearch {
         let plan = program.plans[planIndex]
         let segment = plan.segment
         guard !full[segment], position >= 0, stepsLeft > 0 else { return }
+        if let regex = plan.regex {
+            verifyRegex(plan, regex, atom: position)
+            return
+        }
 
         // Fast path: a single run forwards and at most one run backwards (most strings).
         if plan.forward.count == 1, case .run(let forward) = plan.forward[0] {
@@ -345,6 +352,46 @@ final class YaraSearch {
             return starts.count >= cap
         }
         for start in starts { record(segment, YaraSpan(start: start, end: end)) }
+    }
+
+    /// Tries a regular expression from every start its atom allows (`position` is where the
+    /// atom was found; for linear scans, the start itself).
+    private func verifyRegex(_ plan: YaraMatchPlan, _ regex: YaraRegex, atom position: Int) {
+        let segment = plan.segment
+        let planKey = plan.segment
+        let budget = min(limits.maxStepsPerCandidate, stepsLeft, segmentSteps[segment])
+        let matcher = YaraRegexMatcher(data: data, wide: regex.wide, steps: budget)
+        defer { charge(segment, max(1, budget - matcher.steps)) }
+        let unit = regex.wide ? 2 : 1
+        var lead = plan.regexLead.lowerBound
+        while lead <= plan.regexLead.upperBound {
+            let start = position - lead
+            if start < 0 { break }
+            if !regex.anchoredAtStart || start == 0, !seen[segment].contains(start),
+               mayMatch(regex, key: planKey, from: start),
+               let end = matcher.match(regex.root, at: start) {
+                record(segment, YaraSpan(start: start, end: end))
+            }
+            if matcher.exhausted || full[segment] { break }
+            lead += unit
+        }
+    }
+
+    /// False when none of the expression's required bytes occurs within its reach of `start`
+    /// (then no match can begin there). Lookups move forward, so a scan costs one pass.
+    private func mayMatch(_ regex: YaraRegex, key: Int, from start: Int) -> Bool {
+        guard let required = regex.required else { return true }
+        var next: Int
+        if let cached = requiredNext[key], cached.from <= start, cached.at >= start {
+            next = cached.at
+        } else {
+            next = start
+            while next < data.count, !required.contains(data[next]) { next += 1 }
+            requiredNext[key] = (start, next)
+            charge(key, (next - start) >> 6)
+        }
+        let reach = YaraRegex.scanLimit * (regex.wide ? 2 : 1)
+        return next < data.count && next - start < reach
     }
 
     /// Matches a segment keeps. A later piece of a split hex string keeps many more: only
@@ -395,6 +442,20 @@ final class YaraSearch {
 
     private func scanLinearly(_ planIndex: Int) {
         let plan = program.plans[planIndex]
+        if let regex = plan.regex {
+            if regex.anchoredAtStart {
+                verify(planIndex, at: 0)
+                return
+            }
+            let limit = linearLimit
+            for position in 0..<limit {
+                if full[plan.segment] || stepsLeft <= 0 { break }
+                if !regex.firstBytes.contains(data[position]) { continue }
+                verify(planIndex, at: position)
+            }
+            charge(plan.segment, limit >> 4)
+            return
+        }
         let limit = linearLimit
         var first: YaraPatternByte?
         if case .run(let bytes)? = plan.forward.first, let byte = bytes.first, byte.mask != 0 { first = byte }

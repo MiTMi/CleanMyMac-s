@@ -219,8 +219,9 @@ follows the safety rules below.
     `/private/var/protected/xprotect/XProtect.bundle/Contents/Resources/` (macOS 15+, preferred)
     or `/Library/Apple/System/Library/CoreServices/XProtect.bundle/Contents/Resources/`, run by
     Spruce's own YARA engine (`YaraRuleSet` in `SpruceCore/Protection/Yara*.swift`, no
-    third-party code). Rules using syntax the engine doesn't support (regex and base64 strings,
-    the pe/macho/math modules, `entrypoint`…) are skipped one by one with a reason, together
+    third-party code; regular-expression strings are supported, with YARA's 4 KB match
+    reach). Rules using syntax the engine doesn't support (base64 strings, `matches`, the
+    pe/macho/math modules, `entrypoint`…) are skipped one by one with a reason, together
     with the rules that refer to them; matching, hashing and condition work are capped so a
     rule can't hang a scan, and nesting is capped so a rule can't overflow the stack.
     `ProtectionAppleRulesLoader` compiles the file once per size + date + inode; rules that

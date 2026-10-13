@@ -356,7 +356,7 @@ final class ProtectionThreatFeedTests: XCTestCase {
         ], rejected: ["x"])
         let rules = ProtectionRuleSource.threatList(YaraRuleSet(source: """
         rule A { strings: $a = "spruce-status-a" condition: $a }
-        rule B { strings: $a = /regex/ condition: $a }
+        rule B { strings: $a = "unsupported" base64 condition: $a }
         rule C { condition: filesize >= 0 }
         """, origin: ProtectionRuleSource.threatListName))
         status.recordUpdate(feed: parsed, rules: rules, at: now)

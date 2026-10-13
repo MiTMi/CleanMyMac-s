@@ -13,7 +13,9 @@ import Musl
 // * Rules: `import`, `private`, `global`, tags, meta (text, number, true/false), comments.
 // * Strings: text with ascii, wide, nocase, fullword, private and xor[(a-b)]; hex with
 //   `??`, nibble wildcards (`4?`, `?4`), `~` (not), jumps (`[n]`, `[n-m]`, `[n-]`, `[-]`)
-//   and nested alternatives.
+//   and nested alternatives; regular expressions (`/…/is`) with classes, `\w \s \d`,
+//   anchors, groups, alternation and greedy or lazy quantifiers, plus the text modifiers
+//   (see `YaraRegex.swift`; like YARA, a match reaches at most 4 KB from its start).
 // * Conditions: and/or/not, comparisons, arithmetic and bitwise operators, `filesize`
 //   (with KB/MB), `$a`, `$a at …`, `$a in (…..…)`, `#a`, `#a in (…)`, `@a[i]`, `!a[i]`,
 //   `all/any/none/N/N% of <strings or rules> [at/in]`, `for … of … : (…)`,
@@ -21,7 +23,7 @@ import Musl
 //   `hash.md5/sha1/sha256/crc32/checksum32(offset, size)` or `(text)`, `defined`,
 //   `contains`/`startswith`/… on texts, references to other rules (also before they appear).
 //
-// Anything else — regular expressions, base64 strings, other modules (pe, macho, math…),
+// Anything else — base64 strings, `matches`, other modules (pe, macho, math…),
 // `entrypoint`, `include` — skips only the rules that use it (and rules that refer to
 // those), each with a reason in `skipped`. A syntax error skips the rule it is in.
 //
