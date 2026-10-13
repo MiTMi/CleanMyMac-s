@@ -60,6 +60,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         if Bundle.main.bundleIdentifier != nil {
             UNUserNotificationCenter.current().delegate = self
             Notifier.registerCategories()
+            // Keep the weekly Checkup reminder in step with settings on every launch.
+            SettingsReminderScheduler.sync(SettingsStore.shared.settings)
         }
         SystemMonitor.shared.start()
     }

@@ -173,7 +173,11 @@ public final class SystemMonitor: @unchecked Sendable {
         defer { isEmptyingTrash = false }
         let outcome = await FileRemover.shared.emptyTrash(module: .cleanup)
         if outcome.processedCount > 0 || !outcome.failures.isEmpty {
-            HistoryStore.shared.record(outcome, kind: .clean)
+            // Recorded as `.other`: the bytes were already counted as freed when the items
+            // were moved to the Trash, so counting them again here would double the total.
+            var entry = outcome
+            entry.summary = "Emptied the Trash · " + outcome.summary
+            HistoryStore.shared.record(entry, kind: .other)
         }
         let status = await measureTrashNow()
         applyTrash(status)
