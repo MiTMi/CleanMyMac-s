@@ -1,0 +1,240 @@
+import Darwin
+import Foundation
+import SpruceCore
+
+/// Real-time protection: watches the launchd folders malware uses to stay on a Mac and
+/// alerts when a new third-party startup item appears (notify-only, never removes on its
+/// own). Each new item is evaluated with the malware scanner, so known threats and
+/// suspicious items get a stronger alert. Newly installed apps in /Applications and
+/// ~/Applications are checked against the threat catalog too; only flagged apps alert.
+/// The scanner uses the same detection data as malware scans (`ProtectionDetectionLibrary`:
+/// the catalog merged with the threat list while it's on, Apple's XProtect rules and the
+/// threat list's rules).
+///
+/// Folder changes arrive through `DispatchSource` file-system sources (one per folder);
+/// a one-minute timer re-checks everything as a fallback and picks up folders that are
+/// created later. Alerts respect Settings › Protection (`realtimeProtection`), the
+/// threat-notification toggle (`notifyThreats`) and the ignore list.
+public final class ProtectionRealtimeMonitor: @unchecked Sendable {
+    /// Posted on the main thread for every new startup item; `userInfo["event"]` holds the
+    /// `ProtectionRealtimeEvent`.
+    public static let eventNotification = Notification.Name("SpruceProtectionRealtimeEvent")
+    public static let eventKey = "event"
+
+    struct Folder: Hashable {
+        var path: String
+        var domain: ProtectionLaunchDomain
+        var kind: ProtectionItemKind
+    }
+
+    private let probe: ProtectionMacSystemProbe
+    private let library: ProtectionDetectionLibrary
+    private let queue = DispatchQueue(label: "app.spruce.protection.realtime", qos: .utility)
+    private let lock = NSLock()
+
+    // Confined to `queue`.
+    private var sources: [String: DispatchSourceFileSystemObject] = [:]
+    private var snapshots: [String: Set<String>] = [:]
+    /// New apps whose Info.plist hasn't appeared yet (still being copied): path → (folder, checks so far).
+    private var pendingApps: [String: (folder: Folder, attempts: Int)] = [:]
+    private var timer: DispatchSourceTimer?
+    private var pendingCheck: DispatchWorkItem?
+    private var active = false
+
+    // Guarded by `lock`.
+    private var runningFlag = false
+    private var events: [ProtectionRealtimeEvent] = []
+
+    init(probe: ProtectionMacSystemProbe, library: ProtectionDetectionLibrary) {
+        self.probe = probe
+        self.library = library
+    }
+
+    /// True while the folders are being watched.
+    public var isRunning: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return runningFlag
+    }
+
+    /// New startup items noticed since launch, newest first (at most 50).
+    public var recentEvents: [ProtectionRealtimeEvent] {
+        lock.lock()
+        defer { lock.unlock() }
+        return events
+    }
+
+    /// The watched folders.
+    var folders: [Folder] {
+        [
+            Folder(path: NSHomeDirectory() + "/Library/LaunchAgents", domain: .user, kind: .launchAgent),
+            Folder(path: "/Library/LaunchAgents", domain: .user, kind: .launchAgent),
+            Folder(path: "/Library/LaunchDaemons", domain: .system, kind: .launchDaemon),
+            Folder(path: "/Applications", domain: .user, kind: .application),
+            Folder(path: NSHomeDirectory() + "/Applications", domain: .user, kind: .application),
+        ]
+    }
+
+    /// Starts watching (idempotent). Items already present are not reported.
+    public func start() {
+        queue.async { [weak self] in
+            guard let self, !self.active else { return }
+            self.active = true
+            self.setRunning(true)
+            for folder in self.folders {
+                self.snapshots[folder.path] = Self.listing(folder.path)
+                self.attach(folder)
+            }
+            let timer = DispatchSource.makeTimerSource(queue: self.queue)
+            timer.schedule(deadline: .now() + 60, repeating: 60, leeway: .seconds(10))
+            timer.setEventHandler { [weak self] in self?.check() }
+            self.timer = timer
+            timer.resume()
+        }
+    }
+
+    /// Stops watching (idempotent).
+    public func stop() {
+        queue.async { [weak self] in
+            guard let self, self.active else { return }
+            self.active = false
+            self.setRunning(false)
+            self.pendingCheck?.cancel()
+            self.pendingCheck = nil
+            self.timer?.cancel()
+            self.timer = nil
+            for source in self.sources.values { source.cancel() }
+            self.sources.removeAll()
+            self.snapshots.removeAll()
+            self.pendingApps.removeAll()
+        }
+    }
+
+    // MARK: Watching (on `queue`)
+
+    private func setRunning(_ value: Bool) {
+        lock.lock()
+        runningFlag = value
+        lock.unlock()
+    }
+
+    private func attach(_ folder: Folder) {
+        guard sources[folder.path] == nil else { return }
+        let fd = open(folder.path, O_EVTONLY)
+        guard fd >= 0 else { return }
+        let source = DispatchSource.makeFileSystemObjectSource(fileDescriptor: fd, eventMask: [.write, .delete, .rename],
+                                                               queue: queue)
+        let path = folder.path
+        source.setEventHandler { [weak self] in
+            guard let self, let current = self.sources[path] else { return }
+            let mask = current.data
+            if mask.contains(.delete) || mask.contains(.rename) {
+                // The folder itself went away or was replaced: re-attach on the next check.
+                current.cancel()
+                self.sources[path] = nil
+            }
+            self.scheduleCheck()
+        }
+        source.setCancelHandler {
+            close(fd)
+        }
+        sources[folder.path] = source
+        source.resume()
+    }
+
+    /// Coalesces bursts of events (installers write several files at once).
+    private func scheduleCheck() {
+        pendingCheck?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.check() }
+        pendingCheck = work
+        queue.asyncAfter(deadline: .now() + 1.5, execute: work)
+    }
+
+    private func check() {
+        guard active else { return }
+        var added: [(Folder, String)] = []
+        var addedApps: [(Folder, String)] = pendingApps.map { ($0.value.folder, $0.key) }
+        for folder in folders {
+            if sources[folder.path] == nil { attach(folder) }
+            let current = Self.listing(folder.path)
+            let previous = snapshots[folder.path] ?? []
+            if folder.kind == .application {
+                for name in ProtectionLaunchWatch.addedApplications(previous: previous, current: current) {
+                    let path = folder.path + "/" + name
+                    if pendingApps[path] == nil { addedApps.append((folder, path)) }
+                }
+            } else {
+                for name in ProtectionLaunchWatch.addedItems(previous: previous, current: current) {
+                    added.append((folder, folder.path + "/" + name))
+                }
+            }
+            snapshots[folder.path] = current
+        }
+        guard !added.isEmpty || !addedApps.isEmpty else { return }
+        let home = NSHomeDirectory()
+        let inputs = library.scannerInputs()
+        let scanner = ProtectionMalwareScanner(space: ProtectionPathSpace(home: home), catalog: inputs.catalog, probe: probe,
+                                               ruleSources: inputs.ruleSources)
+        let threshold = ProtectionScanDepth.balanced.heuristicThreshold
+        var newEvents = added.map { folder, path -> ProtectionRealtimeEvent in
+            let item = ProtectionLaunchItem.parse(path: path, domain: folder.domain, kind: folder.kind, home: home)
+            let finding = scanner.evaluateLaunchPlist(path: path, domain: folder.domain, kind: folder.kind, threshold: threshold)
+            return ProtectionRealtimeEvent(path: path, label: item.label, domain: folder.domain, kind: folder.kind,
+                                           finding: finding)
+        }
+        // New apps: notify only when the threat catalog flags them (installing apps is normal).
+        for (folder, path) in addedApps {
+            guard FileWalker.entry(at: path) != nil else {
+                pendingApps[path] = nil
+                continue
+            }
+            if FileWalker.entry(at: path + "/Contents/Info.plist") == nil {
+                // Still being copied: look again on the next check (for about ten minutes).
+                let attempts = (pendingApps[path]?.attempts ?? 0) + 1
+                if attempts < 10 {
+                    pendingApps[path] = (folder: folder, attempts: attempts)
+                } else {
+                    pendingApps[path] = nil
+                }
+                continue
+            }
+            pendingApps[path] = nil
+            if let finding = scanner.evaluateApplication(at: path) {
+                newEvents.append(ProtectionRealtimeEvent(path: path, label: nil, domain: folder.domain, kind: .application,
+                                                         finding: finding))
+            }
+        }
+        guard !newEvents.isEmpty else { return }
+        let events = newEvents
+        DispatchQueue.main.async { [weak self] in
+            self?.deliver(events)
+        }
+    }
+
+    private static func listing(_ path: String) -> Set<String> {
+        Set((try? FileManager.default.contentsOfDirectory(atPath: path)) ?? [])
+    }
+
+    // MARK: Delivery (main thread)
+
+    private func deliver(_ newEvents: [ProtectionRealtimeEvent]) {
+        let settings = SettingsStore.shared.settings
+        guard settings.realtimeProtection else { return }
+        let visible = newEvents.filter { !settings.isIgnored(path: $0.path) }
+        guard !visible.isEmpty else { return }
+        lock.lock()
+        events = Array((visible.reversed() + events).prefix(50))
+        lock.unlock()
+        for event in visible {
+            if settings.notifyThreats {
+                Notifier.post(id: "app.spruce.protection.realtime.\(event.id.uuidString)", title: event.notificationTitle,
+                              body: event.notificationBody, module: ModuleID.protection.rawValue, tool: "protection.malware")
+            }
+            if event.isThreat {
+                HistoryStore.shared.record(ActivityEntry(module: .protection, kind: .other, count: 1,
+                                                         summary: "Real-time protection flagged \(event.name)"))
+            }
+            NotificationCenter.default.post(name: Self.eventNotification, object: self, userInfo: [Self.eventKey: event])
+        }
+    }
+}

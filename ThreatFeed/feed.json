@@ -1,0 +1,8 @@
+{
+  "about": "Spruce's downloadable threat list. Indicators here only add detections to the catalog built into the app. See README.md for the format and the checks every entry must pass.",
+  "format": 1,
+  "version": 1,
+  "updated": "2026-10-13",
+  "families": [],
+  "indicators": []
+}
