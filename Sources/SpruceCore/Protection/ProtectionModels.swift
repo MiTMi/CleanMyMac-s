@@ -102,6 +102,9 @@ public enum ThreatCategory: String, Codable, Sendable, CaseIterable {
     case dropper
     case miner
     case ransomware
+    /// Malware a signature rule (Apple's XProtect, Spruce's threat list) names without a
+    /// more specific kind.
+    case malware
     case suspicious
 
     public var title: String {
@@ -116,6 +119,7 @@ public enum ThreatCategory: String, Codable, Sendable, CaseIterable {
         case .dropper: return "Malware installer"
         case .miner: return "Cryptominer"
         case .ransomware: return "Ransomware"
+        case .malware: return "Malware"
         case .suspicious: return "Suspicious item"
         }
     }
@@ -133,6 +137,7 @@ public enum ThreatCategory: String, Codable, Sendable, CaseIterable {
         case .dropper: return "shippingbox.fill"
         case .miner: return "cpu.fill"
         case .ransomware: return "lock.doc.fill"
+        case .malware: return "xmark.shield.fill"
         case .suspicious: return "exclamationmark.triangle.fill"
         }
     }
@@ -144,6 +149,8 @@ public enum ThreatEvidence: String, Codable, Sendable {
     case knownIndicator
     /// File content matched a known SHA-256.
     case knownHash
+    /// File content matched a YARA rule (Apple's XProtect rules or Spruce's threat list).
+    case ruleMatch
     /// Scored by behavioural heuristics only.
     case heuristic
 
@@ -151,8 +158,41 @@ public enum ThreatEvidence: String, Codable, Sendable {
         switch self {
         case .knownIndicator: return "Known threat"
         case .knownHash: return "Known malicious file"
+        case .ruleMatch: return "Known malware pattern"
         case .heuristic: return "Suspicious behaviour"
         }
+    }
+
+    /// How strong the evidence is when two findings for the same item are merged:
+    /// catalog matches beat rule matches, which beat heuristics.
+    public var strength: Int {
+        switch self {
+        case .knownIndicator, .knownHash: return 2
+        case .ruleMatch: return 1
+        case .heuristic: return 0
+        }
+    }
+}
+
+/// A YARA rule that matched the file behind a finding.
+public struct ProtectionRuleHit: Codable, Sendable, Hashable {
+    /// Where the rule comes from ("Apple XProtect", "Spruce threat list").
+    public var source: String
+    /// The rule's name ("XProtect_MACOS_ADLOAD_D").
+    public var rule: String
+    /// The rule's description, when it has one ("MACOS.ADLOAD.D").
+    public var detail: String?
+
+    public init(source: String, rule: String, detail: String? = nil) {
+        self.source = source
+        self.rule = rule
+        self.detail = detail
+    }
+
+    /// What the rule detects, for display: its description, else its name.
+    public var label: String {
+        if let detail, !detail.isEmpty { return detail }
+        return rule
     }
 }
 
@@ -303,6 +343,14 @@ public struct ProtectionThreatFinding: Identifiable, Codable, Sendable, Hashable
     /// Set when Spruce cannot remove the item itself (protected location, configuration
     /// profile…); the text explains what the user can do instead.
     public var manualRemovalNote: String?
+    /// The program file behind the finding: the file itself, an app's main executable or the
+    /// program a startup job runs. `sha256` is this file's hash when known; "Check with
+    /// VirusTotal" looks this file up. Nil when there is no single file (folders, cron jobs).
+    public var programPath: String?
+    /// YARA rules that matched `programPath` (or `path`).
+    public var ruleHits: [ProtectionRuleHit]
+    /// The VirusTotal answer for `sha256`, once looked up.
+    public var virusTotal: VirusTotalVerdict?
 
     public init(
         id: String,
@@ -323,7 +371,10 @@ public struct ProtectionThreatFinding: Identifiable, Codable, Sendable, Hashable
         cronLine: String? = nil,
         size: Int64 = 0,
         inode: UInt64? = nil,
-        manualRemovalNote: String? = nil
+        manualRemovalNote: String? = nil,
+        programPath: String? = nil,
+        ruleHits: [ProtectionRuleHit] = [],
+        virusTotal: VirusTotalVerdict? = nil
     ) {
         self.id = id
         self.name = name
@@ -344,13 +395,73 @@ public struct ProtectionThreatFinding: Identifiable, Codable, Sendable, Hashable
         self.size = size
         self.inode = inode
         self.manualRemovalNote = manualRemovalNote
+        self.programPath = programPath
+        self.ruleHits = ruleHits
+        self.virusTotal = virusTotal
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, family, category, severity, evidence, reasons, kind, path, relatedPaths, launchLabel,
+             launchDomain, signing, sha256, score, cronLine, size, inode, manualRemovalNote, programPath, ruleHits,
+             virusTotal
+    }
+
+    /// Decodes leniently: fields added later (program, rule hits, VirusTotal) may be missing.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        family = try c.decodeIfPresent(String.self, forKey: .family)
+        category = (try? c.decode(ThreatCategory.self, forKey: .category)) ?? .suspicious
+        severity = (try? c.decode(ThreatSeverity.self, forKey: .severity)) ?? .medium
+        evidence = (try? c.decode(ThreatEvidence.self, forKey: .evidence)) ?? .heuristic
+        reasons = try c.decodeIfPresent([String].self, forKey: .reasons) ?? []
+        kind = (try? c.decode(ProtectionItemKind.self, forKey: .kind)) ?? .file
+        path = try c.decodeIfPresent(String.self, forKey: .path)
+        relatedPaths = try c.decodeIfPresent([String].self, forKey: .relatedPaths) ?? []
+        launchLabel = try c.decodeIfPresent(String.self, forKey: .launchLabel)
+        launchDomain = try? c.decodeIfPresent(ProtectionLaunchDomain.self, forKey: .launchDomain)
+        signing = try? c.decodeIfPresent(ProtectionSigningInfo.self, forKey: .signing)
+        sha256 = try c.decodeIfPresent(String.self, forKey: .sha256)
+        score = try c.decodeIfPresent(Int.self, forKey: .score) ?? 0
+        cronLine = try c.decodeIfPresent(String.self, forKey: .cronLine)
+        size = try c.decodeIfPresent(Int64.self, forKey: .size) ?? 0
+        inode = try c.decodeIfPresent(UInt64.self, forKey: .inode)
+        manualRemovalNote = try c.decodeIfPresent(String.self, forKey: .manualRemovalNote)
+        programPath = try c.decodeIfPresent(String.self, forKey: .programPath)
+        ruleHits = (try? c.decodeIfPresent([ProtectionRuleHit].self, forKey: .ruleHits)) ?? []
+        virusTotal = try? c.decodeIfPresent(VirusTotalVerdict.self, forKey: .virusTotal)
     }
 
     /// The strongest reason.
     public var reason: String { reasons.first ?? category.title }
 
-    /// Matched a documented indicator or hash.
+    /// Matched a documented indicator, hash or malware rule.
     public var isKnownThreat: Bool { evidence != .heuristic }
+
+    /// Sources of the rules that matched, without repeats ("Apple XProtect").
+    public var ruleSources: [String] {
+        var seen: [String] = []
+        for hit in ruleHits where !seen.contains(hit.source) { seen.append(hit.source) }
+        return seen
+    }
+
+    /// Records a VirusTotal answer: keeps it, puts its line among the reasons (replacing an
+    /// older one) and raises the severity to High when enough engines flag the file. The
+    /// evidence and pre-selection stay as they were.
+    public mutating func applyVirusTotal(_ verdict: VirusTotalVerdict) {
+        virusTotal = verdict
+        if sha256 == nil { sha256 = verdict.sha256 }
+        reasons.removeAll { $0.hasPrefix(VirusTotalVerdict.reasonPrefix) }
+        let line = verdict.reason
+        if verdict.level == .flagged {
+            // The strongest outside evidence goes right after the finding's own main reason.
+            reasons.insert(line, at: min(1, reasons.count))
+            severity = max(severity, .high)
+        } else {
+            reasons.append(line)
+        }
+    }
 
     /// Pre-selected for removal: known threats other than potentially unwanted apps,
     /// which Spruce can remove itself. Everything else waits for the user's decision.
@@ -425,6 +536,16 @@ public enum ProtectionMetaKey {
     public static let manual = "protection.manual"
     public static let reasons = "protection.reasons"
     public static let cronLine = "protection.cronLine"
+    /// The program file behind the finding (`ProtectionThreatFinding.programPath`).
+    public static let program = "protection.program"
+    /// Sources of the YARA rules that matched, one per line ("Apple XProtect").
+    public static let ruleSources = "protection.ruleSources"
+    /// Names of the YARA rules that matched, one per line.
+    public static let rules = "protection.rules"
+    /// What the matched rules detect (descriptions or names), one per line.
+    public static let ruleLabels = "protection.ruleLabels"
+    /// The VirusTotal answer, encoded with `VirusTotalVerdict.metadataValue`.
+    public static let virusTotal = "protection.virusTotal"
     /// FileRemover's inode check key (shared contract).
     public static let inode = "inode"
 
@@ -497,6 +618,13 @@ public extension ProtectionThreatFinding {
         if let manualRemovalNote { metadata[ProtectionMetaKey.manual] = manualRemovalNote }
         if let cronLine { metadata[ProtectionMetaKey.cronLine] = cronLine }
         if let inode { metadata[ProtectionMetaKey.inode] = String(inode) }
+        if let programPath { metadata[ProtectionMetaKey.program] = programPath }
+        if !ruleHits.isEmpty {
+            metadata[ProtectionMetaKey.ruleSources] = ruleSources.joined(separator: "\n")
+            metadata[ProtectionMetaKey.rules] = ruleHits.map(\.rule).joined(separator: "\n")
+            metadata[ProtectionMetaKey.ruleLabels] = ruleHits.map(\.label).joined(separator: "\n")
+        }
+        if let virusTotal, let value = virusTotal.metadataValue { metadata[ProtectionMetaKey.virusTotal] = value }
 
         let recommended = isRecommendedForRemoval
         let titleText = family.map { "\($0) · \(name)" } ?? name

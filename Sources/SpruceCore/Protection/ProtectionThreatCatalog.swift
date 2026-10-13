@@ -29,7 +29,7 @@ public struct ProtectionThreatFamily: Sendable, Hashable, Identifiable {
 
 /// One documented indicator of compromise.
 public struct ProtectionIndicator: Sendable, Hashable {
-    public enum Kind: String, Sendable, Hashable {
+    public enum Kind: String, Sendable, Hashable, CaseIterable {
         /// Logical path glob (`~` = home). `*` and `?` stay within one path component.
         case path
         /// Regular expression over the logical path.
@@ -46,17 +46,40 @@ public struct ProtectionIndicator: Sendable, Hashable {
         case sha256
     }
 
+    /// Where an indicator comes from.
+    public enum Origin: String, Sendable, Hashable {
+        /// Spruce's curated catalog, shipped with the app.
+        case builtIn
+        /// Spruce's downloaded threat list. Such indicators only add detections and are
+        /// ignored for Apple-signed files.
+        case threatList
+    }
+
     public let kind: Kind
     public let pattern: String
     public let familyID: String
     /// Only match executable files (Mach-O, scripts with a shebang, or files with an x bit).
     public let executableOnly: Bool
+    public let origin: Origin
 
-    public init(_ kind: Kind, _ pattern: String, family: String, executableOnly: Bool = false) {
+    public init(_ kind: Kind, _ pattern: String, family: String, executableOnly: Bool = false, origin: Origin = .builtIn) {
         self.kind = kind
         self.pattern = pattern
         self.familyID = family
         self.executableOnly = executableOnly
+        self.origin = origin
+    }
+
+    /// Identity for spotting the same indicator twice (family and origin aside).
+    var dedupeKey: String {
+        let normalized: String
+        switch kind {
+        case .sha256: normalized = pattern.lowercased()
+        case .teamID: normalized = pattern.uppercased()
+        case .pathRegex: normalized = pattern
+        case .path, .launchLabel, .bundleID, .bundleName: normalized = pattern.lowercased()
+        }
+        return "\(kind.rawValue)|\(executableOnly ? 1 : 0)|\(normalized)"
     }
 }
 
@@ -70,14 +93,16 @@ public struct ProtectionCatalogMatch: Sendable, Hashable {
         if family.id == "fakeflash" {
             return "Uses the name of the retired Flash Player, a common disguise for malware installers"
         }
+        let text: String
         switch indicator.kind {
-        case .path, .pathRegex: return "Location used by \(family.name)"
-        case .launchLabel: return "Startup job name used by \(family.name)"
-        case .bundleID: return "App identifier of \(family.name)"
-        case .bundleName: return "Known \(family.name) component"
-        case .teamID: return "Signed with a revoked developer identity used by \(family.name)"
-        case .sha256: return "File is a known \(family.name) sample (SHA-256 match)"
+        case .path, .pathRegex: text = "Location used by \(family.name)"
+        case .launchLabel: text = "Startup job name used by \(family.name)"
+        case .bundleID: text = "App identifier of \(family.name)"
+        case .bundleName: text = "Known \(family.name) component"
+        case .teamID: text = "Signed with a revoked developer identity used by \(family.name)"
+        case .sha256: text = "File is a known \(family.name) sample (SHA-256 match)"
         }
+        return indicator.origin == .threatList ? text + " (from the downloaded threat list)" : text
     }
 
     public var evidence: ThreatEvidence { indicator.kind == .sha256 ? .knownHash : .knownIndicator }
@@ -121,41 +146,70 @@ public enum ProtectionGlob {
     public static func isPattern(_ s: String) -> Bool { s.contains("*") || s.contains("?") }
 }
 
-/// The curated indicator catalog.
+/// The curated indicator catalog (optionally merged with the downloaded threat list).
 public struct ProtectionThreatCatalog: Sendable {
     public let families: [ProtectionThreatFamily]
     public let indicators: [ProtectionIndicator]
 
     private let familiesByID: [String: ProtectionThreatFamily]
-    private let hashes: [String: String]
-    private let teams: [String: String]
+    private let hashes: [String: ProtectionIndicator]
+    private let teams: [String: ProtectionIndicator]
+    /// Wildcard-free path indicators by lowercased path → positions in `indicators`.
+    private let literalPathIndex: [String: [Int]]
+    /// Positions of the other path indicators (globs and regular expressions), in order.
+    private let patternPathPositions: [Int]
 
     public init(families: [ProtectionThreatFamily], indicators: [ProtectionIndicator]) {
         self.families = families
         self.indicators = indicators
         var byID: [String: ProtectionThreatFamily] = [:]
-        for family in families { byID[family.id] = family }
+        for family in families where byID[family.id] == nil { byID[family.id] = family }
         familiesByID = byID
-        var hashes: [String: String] = [:]
-        var teams: [String: String] = [:]
-        for indicator in indicators {
+        // The first indicator for a hash or team wins, like everywhere else in the catalog.
+        var hashes: [String: ProtectionIndicator] = [:]
+        var teams: [String: ProtectionIndicator] = [:]
+        var literal: [String: [Int]] = [:]
+        var patterns: [Int] = []
+        for (index, indicator) in indicators.enumerated() {
             switch indicator.kind {
-            case .sha256: hashes[indicator.pattern.lowercased()] = indicator.familyID
-            case .teamID: teams[indicator.pattern.uppercased()] = indicator.familyID
-            default: break
+            case .sha256:
+                let key = indicator.pattern.lowercased()
+                if hashes[key] == nil { hashes[key] = indicator }
+            case .teamID:
+                let key = indicator.pattern.uppercased()
+                if teams[key] == nil { teams[key] = indicator }
+            case .path where !ProtectionGlob.isPattern(indicator.pattern):
+                literal[indicator.pattern.lowercased(), default: []].append(index)
+            case .path, .pathRegex:
+                patterns.append(index)
+            default:
+                break
             }
         }
         self.hashes = hashes
         self.teams = teams
+        literalPathIndex = literal
+        patternPathPositions = patterns
     }
 
     public func family(id: String) -> ProtectionThreatFamily? { familiesByID[id] }
 
     // MARK: Matching
 
-    /// Matches a logical path ("~/…" or "/…", see `ProtectionPathSpace`).
+    /// Matches a logical path ("~/…" or "/…", see `ProtectionPathSpace`). The first matching
+    /// indicator in catalog order wins.
     public func matchPath(_ logicalPath: String, isExecutable: Bool) -> ProtectionCatalogMatch? {
-        for indicator in indicators where indicator.kind == .path || indicator.kind == .pathRegex {
+        // Literal paths are a dictionary lookup; patterns are tried in order, stopping at
+        // the best literal hit so the result is the same as a plain walk over `indicators`.
+        var best = Int.max
+        for index in literalPathIndex[logicalPath.lowercased()] ?? [] {
+            let indicator = indicators[index]
+            if indicator.executableOnly && !isExecutable { continue }
+            if familiesByID[indicator.familyID] != nil { best = min(best, index) }
+        }
+        for index in patternPathPositions {
+            if index >= best { break }
+            let indicator = indicators[index]
             if indicator.executableOnly && !isExecutable { continue }
             let hit: Bool
             if indicator.kind == .path {
@@ -163,9 +217,13 @@ public struct ProtectionThreatCatalog: Sendable {
             } else {
                 hit = ProtectionRegexCache.matches(indicator.pattern, logicalPath)
             }
-            if hit, let match = makeMatch(indicator) { return match }
+            if hit, familiesByID[indicator.familyID] != nil {
+                best = index
+                break
+            }
         }
-        return nil
+        guard best != Int.max else { return nil }
+        return makeMatch(indicators[best])
     }
 
     /// Matches a path or any of its ancestors (a file inside a known malicious folder).
@@ -195,14 +253,13 @@ public struct ProtectionThreatCatalog: Sendable {
     }
 
     public func matchTeamID(_ teamID: String) -> ProtectionCatalogMatch? {
-        guard let familyID = teams[teamID.uppercased()] else { return nil }
-        let indicator = ProtectionIndicator(.teamID, teamID.uppercased(), family: familyID)
-        return makeMatch(indicator)
+        guard let found = teams[teamID.uppercased()] else { return nil }
+        return makeMatch(ProtectionIndicator(.teamID, teamID.uppercased(), family: found.familyID, origin: found.origin))
     }
 
     public func matchHash(_ sha256: String) -> ProtectionCatalogMatch? {
-        guard let familyID = hashes[sha256.lowercased()] else { return nil }
-        return makeMatch(ProtectionIndicator(.sha256, sha256.lowercased(), family: familyID))
+        guard let found = hashes[sha256.lowercased()] else { return nil }
+        return makeMatch(ProtectionIndicator(.sha256, sha256.lowercased(), family: found.familyID, origin: found.origin))
     }
 
     /// Concrete (wildcard-free) path indicators: checked for existence on every scan.
@@ -221,6 +278,30 @@ public struct ProtectionThreatCatalog: Sendable {
     }
 
     public var hashCount: Int { hashes.count }
+
+    /// Indicators that came from the downloaded threat list.
+    public var threatListIndicatorCount: Int { indicators.filter { $0.origin == .threatList }.count }
+
+    /// This catalog plus the downloaded threat list's families and indicators. The catalog's
+    /// own families win when an id is used twice, and indicators it already has are not
+    /// added again, so the threat list can only add detections.
+    public func merging(_ feed: ProtectionThreatFeed) -> ProtectionThreatCatalog {
+        guard !feed.families.isEmpty || !feed.indicators.isEmpty else { return self }
+        var mergedFamilies = families
+        var familyIDs = Set(families.map(\.id))
+        for family in feed.families where familyIDs.insert(family.id).inserted {
+            mergedFamilies.append(family)
+        }
+        var mergedIndicators = indicators
+        var seen = Set(indicators.map(\.dedupeKey))
+        for indicator in feed.indicators where familyIDs.contains(indicator.familyID) {
+            let tagged = indicator.origin == .threatList ? indicator
+                : ProtectionIndicator(indicator.kind, indicator.pattern, family: indicator.familyID,
+                                      executableOnly: indicator.executableOnly, origin: .threatList)
+            if seen.insert(tagged.dedupeKey).inserted { mergedIndicators.append(tagged) }
+        }
+        return ProtectionThreatCatalog(families: mergedFamilies, indicators: mergedIndicators)
+    }
 
     private func firstMatch(_ kind: ProtectionIndicator.Kind, _ test: (String) -> Bool) -> ProtectionCatalogMatch? {
         for indicator in indicators where indicator.kind == kind && test(indicator.pattern) {
