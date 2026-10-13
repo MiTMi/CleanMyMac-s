@@ -35,10 +35,10 @@ final class ProtectionDetectionSourcesTests: XCTestCase {
             Macho and $a
     }
 
-    rule Uses_Regex
+    rule Uses_Base64
     {
         strings:
-            $r = /spruce[0-9]+/
+            $r = "spruce" base64
         condition:
             $r
     }
@@ -74,7 +74,7 @@ final class ProtectionDetectionSourcesTests: XCTestCase {
         XCTAssertEqual(status.path, newPath)
         XCTAssertEqual(status.version, "5310")
         XCTAssertEqual(status.activeRuleCount, 1, "The private rule doesn't count")
-        XCTAssertEqual(status.skippedRuleCount, 1, "The regex rule is skipped")
+        XCTAssertEqual(status.skippedRuleCount, 1, "The base64 rule is skipped")
         XCTAssertTrue(status.isAvailable)
         XCTAssertNil(status.unavailableReason)
         XCTAssertEqual(status.summary, "Version 5310 · 1 rule")

@@ -259,6 +259,22 @@ enum YaraCompiler {
             switch segment.kind {
             case .xor:
                 program.xorSegments.append(id)
+            case .regex(let regex):
+                let planIndex = program.plans.count
+                if let atom = regex.atom {
+                    program.plans.append(YaraMatchPlan(segment: id, forward: [], backward: [], regex: regex,
+                                                       regexLead: atom.leadMin...atom.leadMax))
+                    for bytes in YaraAtoms.expand(atom.bytes)
+                    where seenAtoms.insert(AtomKey(bytes: bytes, plan: planIndex)).inserted {
+                        atoms.append(bytes)
+                        program.atomPlans.append(Int32(planIndex))
+                        program.atomSegments.append(Int32(id))
+                        program.atomLengths.append(Int32(bytes.count))
+                    }
+                } else {
+                    program.plans.append(YaraMatchPlan(segment: id, forward: [], backward: [], regex: regex))
+                    program.linearPlans.append(planIndex)
+                }
             case .pattern(let elements):
                 let planIndex = program.plans.count
                 if let choice = YaraAtoms.choose(elements) {
@@ -292,8 +308,30 @@ enum YaraCompiler {
             }
             let modifiers = string.modifiers
             switch string.value {
-            case .regex:
-                throw YaraCompileIssue(reason: "Uses a regular expression (\(shown)), which Spruce can't scan for")
+            case .regex(let body, let flags):
+                if modifiers.base64 {
+                    throw YaraCompileIssue(reason: "Uses a base64 string (\(shown)), which Spruce can't scan for")
+                }
+                if modifiers.xor != nil {
+                    throw YaraCompileIssue(reason: "\(shown) combines xor with a regular expression, which YARA doesn't allow")
+                }
+                if let unknown = flags.first(where: { $0 != "i" && $0 != "s" }) {
+                    throw YaraCompileIssue(reason: "\(shown) uses the regular expression flag \(unknown), which Spruce doesn't know")
+                }
+                do {
+                    let root = try YaraRegexParser.parse(body, caseless: modifiers.nocase || flags.contains("i"),
+                                                         dotAll: flags.contains("s"))
+                    var forms: [Bool] = []
+                    if modifiers.ascii || !modifiers.wide { forms.append(false) }
+                    if modifiers.wide { forms.append(true) }
+                    let chains = try forms.map { wide in
+                        YaraChain(segments: [YaraSegment(kind: .regex(try YaraRegex(root: root, wide: wide)),
+                                                         fullword: modifiers.fullword, wide: wide)], gaps: [])
+                    }
+                    out.append((string.name, chains))
+                } catch let issue as YaraCompileIssue {
+                    throw YaraCompileIssue(reason: "In \(shown), " + issue.reason)
+                }
             case .hex(let body):
                 if modifiers.ascii || modifiers.wide || modifiers.nocase || modifiers.fullword || modifiers.xor != nil
                     || modifiers.base64 {

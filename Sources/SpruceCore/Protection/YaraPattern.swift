@@ -68,6 +68,8 @@ struct YaraSegment: Sendable, Hashable {
         case pattern([YaraPatternElement])
         /// Text tried with every single-byte XOR key in the range.
         case xor([UInt8], ClosedRange<Int>)
+        /// A regular expression (`YaraRegex`).
+        case regex(YaraRegex)
     }
 
     var kind: Kind
@@ -90,6 +92,10 @@ struct YaraMatchPlan: Sendable {
     var forward: [YaraPatternElement]
     /// Elements before the atom, reversed, matched backwards from the atom's first byte.
     var backward: [YaraPatternElement]
+    /// For a regular expression: the expression, matched forwards from each possible start.
+    var regex: YaraRegex? = nil
+    /// For a regular expression: how many bytes before the atom a match may start.
+    var regexLead: ClosedRange<Int> = 0...0
 }
 
 /// Problem with a rule found while compiling it (the rule is skipped with this reason).

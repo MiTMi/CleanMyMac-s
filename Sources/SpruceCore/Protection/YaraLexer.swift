@@ -45,7 +45,8 @@ enum YaraRawStringValue: Sendable, Equatable {
     case text([UInt8])
     /// Contents between the braces, comments removed.
     case hex(String)
-    case regex(String)
+    /// Between the slashes (escapes kept as written), and the flags after the closing slash.
+    case regex([UInt8], flags: String)
 }
 
 struct YaraLexer: Sendable {
@@ -125,7 +126,8 @@ struct YaraLexer: Sendable {
         case YaraChar.openBrace:
             return .hex(try readHexBody())
         case YaraChar.slash:
-            return .regex(try readRegex())
+            let regex = try readRegex()
+            return .regex(regex.body, flags: regex.flags)
         default:
             throw YaraSyntaxError(message: "expected a text, hex or regular expression string", line: line)
         }
@@ -138,7 +140,7 @@ struct YaraLexer: Sendable {
         guard position < source.count, source[position] == YaraChar.slash else {
             throw YaraSyntaxError(message: "expected a regular expression after matches", line: line)
         }
-        return try readRegex()
+        return String(decoding: try readRegex().body, as: UTF8.self)
     }
 
     // MARK: Pieces
@@ -299,7 +301,7 @@ struct YaraLexer: Sendable {
         throw YaraSyntaxError(message: "a hex string never ends", line: startLine)
     }
 
-    private mutating func readRegex() throws -> String {
+    private mutating func readRegex() throws -> (body: [UInt8], flags: String) {
         let startLine = line
         position += 1
         var out: [UInt8] = []
@@ -314,8 +316,9 @@ struct YaraLexer: Sendable {
                 continue
             }
             if c == YaraChar.slash {
+                let flagsStart = position
                 while position < source.count, Self.isIdentifierCharacter(source[position]) { position += 1 }
-                return String(decoding: out, as: UTF8.self)
+                return (out, String(decoding: source[flagsStart..<position], as: UTF8.self))
             }
             out.append(c)
         }

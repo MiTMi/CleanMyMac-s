@@ -160,10 +160,12 @@ Without `family`, Spruce looks for a known family name in the description and th
 counts as `malware`.
 
 Supported: text strings (`ascii`, `wide`, `nocase`, `fullword`, `private`, `xor`), hex
-strings (`??`, nibble wildcards, jumps, alternatives), the usual conditions (`all of them`,
+strings (`??`, nibble wildcards, jumps, alternatives), regular expressions (`/…/i`, `/…/s`;
+classes, `\w \s \d`, anchors, groups, `|`, greedy and lazy quantifiers; a match reaches at
+most 4 KB from where it starts), the usual conditions (`all of them`,
 `2 of ($a*)`, `#a > 3`, `$a at 0`, `$a in (0..100)`, `for … of`, `uint32(0) == 0xfeedfacf`,
 `filesize < 1MB`, `hash.sha256(0, filesize) == "…"`, references to other rules, private and
-global rules). Rules that use regular expressions, base64 strings or modules other than
+global rules). Rules that use base64 strings, `matches` or modules other than
 `hash` (`pe`, `macho`, `math`…) are skipped, each on its own, along with the rules that
 refer to them; `include` lines are ignored.
 
