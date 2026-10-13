@@ -189,10 +189,14 @@ public struct ActivityHealthInput: Sendable, Equatable {
     /// Warn when the startup disk has less than this percentage available.
     public var lowDiskThresholdPercent: Int
     public var now: Date
+    /// Snoozed / turned-off suggestions and the "Show suggestions" switch. Only decides which
+    /// cards are listed; the score is the same whatever it holds. Defaults to "show everything".
+    public var advice: ActivityAdviceState
 
     public init(snapshot: SystemSnapshot? = nil, liveIssues: [ActivitySystemIssue]? = nil,
                 history: ActivityHistory = ActivityHistory(), hasFullDiskAccess: Bool = true,
-                realtimeProtectionEnabled: Bool = true, lowDiskThresholdPercent: Int = 10, now: Date = Date()) {
+                realtimeProtectionEnabled: Bool = true, lowDiskThresholdPercent: Int = 10, now: Date = Date(),
+                advice: ActivityAdviceState = ActivityAdviceState()) {
         self.snapshot = snapshot
         self.liveIssues = liveIssues
         self.history = history
@@ -200,6 +204,7 @@ public struct ActivityHealthInput: Sendable, Equatable {
         self.realtimeProtectionEnabled = realtimeProtectionEnabled
         self.lowDiskThresholdPercent = lowDiskThresholdPercent
         self.now = now
+        self.advice = advice
     }
 }
 
@@ -208,8 +213,13 @@ public struct ActivityHealthReport: Equatable, Sendable {
     /// 0–100.
     public var score: Int
     public var level: ActivityHealthLevel
-    /// Most urgent first.
+    /// Cards to list, most urgent first (snoozed and turned-off ones left out).
     public var recommendations: [ActivityRecommendation]
+    /// Factors that still count toward the score but whose cards the user snoozed or turned
+    /// off (or muted with "Show suggestions" off), most urgent first.
+    public var hiddenRecommendations: [ActivityRecommendation]
+    /// The "Show suggestions" switch the report was made with.
+    public var showsSuggestions: Bool
     /// False until live system data is available (the score then reflects upkeep only).
     public var isRated: Bool
     /// 100 minus the live system penalties (matches the menu bar when fed live issues).
@@ -224,10 +234,13 @@ public struct ActivityHealthReport: Equatable, Sendable {
     public var unresolvedThreats: Int
 
     public init(score: Int, level: ActivityHealthLevel, recommendations: [ActivityRecommendation], isRated: Bool,
-                systemScore: Int, careScore: Int, daysSinceCheckup: Int?, daysSinceCleanup: Int?, unresolvedThreats: Int) {
+                systemScore: Int, careScore: Int, daysSinceCheckup: Int?, daysSinceCleanup: Int?, unresolvedThreats: Int,
+                hiddenRecommendations: [ActivityRecommendation] = [], showsSuggestions: Bool = true) {
         self.score = score
         self.level = level
         self.recommendations = recommendations
+        self.hiddenRecommendations = hiddenRecommendations
+        self.showsSuggestions = showsSuggestions
         self.isRated = isRated
         self.systemScore = systemScore
         self.careScore = careScore
@@ -236,9 +249,30 @@ public struct ActivityHealthReport: Equatable, Sendable {
         self.unresolvedThreats = unresolvedThreats
     }
 
+    /// Every factor that lowers the score, listed or hidden, most urgent first.
+    public var allRecommendations: [ActivityRecommendation] {
+        hiddenRecommendations.isEmpty ? recommendations : ActivityHealth.ordered(recommendations + hiddenRecommendations)
+    }
+
+    /// The same report with the user's choices applied: snoozed and turned-off cards (and,
+    /// with "Show suggestions" off, everything below critical) move to
+    /// `hiddenRecommendations`. Score, level and the other figures never change, so a report
+    /// made without advice (such as `AppModel.healthReport`) can be filtered for display; the
+    /// result matches assessing with that advice. Applying the same advice twice changes nothing.
+    public func applying(_ advice: ActivityAdviceState, now: Date) -> ActivityHealthReport {
+        var copy = self
+        let all = allRecommendations
+        copy.recommendations = all.filter { !advice.hides($0, now: now) }
+        copy.hiddenRecommendations = all.filter { advice.hides($0, now: now) }
+        copy.showsSuggestions = advice.showSuggestions
+        return copy
+    }
+
     /// Headline next to the gauge.
     public var headline: String {
-        if recommendations.isEmpty { return "Your Mac is in great shape" }
+        if recommendations.isEmpty {
+            return hiddenRecommendations.isEmpty ? "Your Mac is in great shape" : "Nothing new to suggest"
+        }
         if let first = recommendations.first, first.severity == .critical { return first.title }
         let count = recommendations.count
         return count == 1 ? "1 suggestion for your Mac" : "\(count) suggestions for your Mac"
@@ -356,23 +390,27 @@ public enum ActivityHealth {
         let systemScore = clamp(100 - systemPenalty)
         let careScore = clamp(min(100 - carePenalty, careCap))
 
-        let ordered = recommendations.enumerated().sorted { a, b in
-            if a.element.severity != b.element.severity { return a.element.severity > b.element.severity }
-            if a.element.penalty != b.element.penalty { return a.element.penalty > b.element.penalty }
-            return a.offset < b.offset
-        }.map(\.element)
-
+        // 4. Snoozed / turned-off cards leave the list but keep counting.
         return ActivityHealthReport(
             score: score,
             level: .level(for: score),
-            recommendations: ordered,
+            recommendations: ordered(recommendations),
             isRated: input.liveIssues != nil || input.snapshot != nil,
             systemScore: systemScore,
             careScore: careScore,
             daysSinceCheckup: checkupDays,
             daysSinceCleanup: cleanupDays,
             unresolvedThreats: threats
-        )
+        ).applying(input.advice, now: input.now)
+    }
+
+    /// Most severe first, then the biggest penalty; ties keep their order.
+    public static func ordered(_ recommendations: [ActivityRecommendation]) -> [ActivityRecommendation] {
+        recommendations.enumerated().sorted { a, b in
+            if a.element.severity != b.element.severity { return a.element.severity > b.element.severity }
+            if a.element.penalty != b.element.penalty { return a.element.penalty > b.element.penalty }
+            return a.offset < b.offset
+        }.map(\.element)
     }
 
     // MARK: System factors

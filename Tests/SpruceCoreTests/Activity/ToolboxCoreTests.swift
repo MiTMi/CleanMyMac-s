@@ -183,3 +183,52 @@ final class ToolboxShredPlanTests: XCTestCase {
         XCTAssertTrue(plan.files.isEmpty)
     }
 }
+
+final class ToolboxShredSelectionTests: XCTestCase {
+    private func plan(_ root: String, bytes: Int64 = 100, problem: String? = nil) -> ToolboxShredPlan {
+        ToolboxShredPlan(root: root, files: [ToolboxShredFile(path: root, inode: 1, size: bytes)], itemCount: 1,
+                         logicalBytes: bytes, allocatedBytes: bytes, problem: problem)
+    }
+
+    func testNormalizedRoot() {
+        XCTAssertEqual(ToolboxShredPlan.normalizedRoot("/a/b///"), "/a/b")
+        XCTAssertEqual(ToolboxShredPlan.normalizedRoot("/"), "/")
+        XCTAssertEqual(ToolboxShredPlan.normalizedRoot("/a/b.txt"), "/a/b.txt")
+    }
+
+    func testPickedItemsStartCheckedAndFinderItemsUnchecked() {
+        let plans = [plan("/u/a.txt"), plan("/u/b.txt"), plan("/u/locked", problem: "Protected")]
+        // Chosen in the Shredder (drop or Choose…): checked, except what can't be shredded.
+        let picked = ToolboxShredPlan.selection(for: plans, previous: [], added: ["/u/a.txt", "/u/b.txt", "/u/locked/"],
+                                                checkAdded: true)
+        XCTAssertEqual(picked, ["/u/a.txt", "/u/b.txt"])
+
+        // Handed over from Finder: listed, but nothing checked.
+        let fromFinder = ToolboxShredPlan.selection(for: plans, previous: [], added: ["/u/a.txt", "/u/b.txt"],
+                                                    checkAdded: false)
+        XCTAssertTrue(fromFinder.isEmpty)
+    }
+
+    func testRecheckKeepsChoicesAndDropsVanishedOrBlockedItems() {
+        let before: Set<String> = ["/u/a.txt", "/u/gone.txt", "/u/now-locked.txt"]
+        let plans = [plan("/u/a.txt"), plan("/u/b.txt"), plan("/u/c.txt"), plan("/u/now-locked.txt", problem: "In use")]
+        // Finder adds c.txt while a.txt was checked and b.txt unchecked.
+        let after = ToolboxShredPlan.selection(for: plans, previous: before, added: ["/u/c.txt"], checkAdded: false)
+        XCTAssertEqual(after, ["/u/a.txt"])
+        // Dropping b.txt again in the Shredder checks it.
+        let dropped = ToolboxShredPlan.selection(for: plans, previous: after, added: ["/u/B.txt/"], checkAdded: true)
+        XCTAssertEqual(dropped, ["/u/a.txt", "/u/b.txt"])
+    }
+
+    func testSelectionSummary() {
+        let plans = [plan("/u/a", bytes: 1_000), plan("/u/b", bytes: 2_000), plan("/u/x", problem: "No")]
+        XCTAssertEqual(ToolboxShredPlan.selectionSummary(plans, checked: []), "None of 2 items checked")
+        XCTAssertEqual(ToolboxShredPlan.selectionSummary(plans, checked: ["/u/b"]),
+                       "1 of 2 checked · \(ByteFormat.string(2_000))")
+        XCTAssertEqual(ToolboxShredPlan.selectionSummary(plans, checked: ["/u/a", "/u/b", "/u/x"]),
+                       "All 2 items checked · \(ByteFormat.string(3_000))")
+        XCTAssertEqual(ToolboxShredPlan.selectionSummary([plans[0]], checked: ["/u/a"]),
+                       "1 item checked · \(ByteFormat.string(1_000))")
+        XCTAssertEqual(ToolboxShredPlan.selectionSummary([plans[2]], checked: []), "Nothing to shred")
+    }
+}

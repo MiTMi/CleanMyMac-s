@@ -168,11 +168,13 @@ struct ToolboxShredderReviewScreen: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: Spacing.m) {
-            ScreenHeader(title: "Shredder", subtitle: ToolboxShredPlan.summary(shredder.plans))
+            ScreenHeader(title: "Shredder", subtitle: ToolboxShredPlan.selectionSummary(shredder.plans, checked: shredder.checked))
             ScrollView {
                 LazyVStack(spacing: Spacing.xs) {
                     ForEach(shredder.plans) { plan in
-                        ToolboxShredRow(plan: plan) { shredder.remove(plan) }
+                        ToolboxShredRow(plan: plan, isChecked: shredder.isChecked(plan),
+                                        onToggle: { shredder.toggle(plan) },
+                                        onRemove: { shredder.remove(plan) })
                     }
                 }
                 .padding(Spacing.s)
@@ -203,9 +205,19 @@ struct ToolboxShredderReviewScreen: View {
         HStack(spacing: Spacing.s) {
             CapsuleButton(title: "Add More…", symbol: "plus") { shredder.choose() }
             CapsuleButton(title: "Clear List", symbol: "xmark") { shredder.clear() }
+            if shredder.checkable.count > 1 {
+                CapsuleButton(title: shredder.allChecked ? "Uncheck All" : "Check All",
+                              symbol: shredder.allChecked ? "square" : "checkmark.square") {
+                    shredder.setAllChecked(!shredder.allChecked)
+                }
+            }
             Spacer()
-            let blocked = shredder.plans.count - shredder.shreddable.count
-            if blocked > 0 {
+            let blocked = shredder.blockedCount
+            if shredder.shreddable.isEmpty && !shredder.checkable.isEmpty {
+                Text("Check the items you want to shred")
+                    .font(SpruceFont.caption)
+                    .foregroundStyle(PrismInk(contrast).secondary)
+            } else if blocked > 0 {
                 Text("\(CountFormat.items(blocked)) can't be shredded")
                     .font(SpruceFont.caption)
                     .foregroundStyle(StatusColor.warning)
@@ -221,6 +233,8 @@ struct ToolboxShredderReviewScreen: View {
 
 struct ToolboxShredRow: View {
     var plan: ToolboxShredPlan
+    var isChecked: Bool
+    var onToggle: () -> Void
     var onRemove: () -> Void
 
     @State private var hovering = false
@@ -228,6 +242,9 @@ struct ToolboxShredRow: View {
 
     var body: some View {
         HStack(spacing: Spacing.m) {
+            SpruceCheckbox(isOn: isChecked && plan.canShred, module: .toolbox, label: plan.name, action: onToggle)
+                .disabled(!plan.canShred)
+                .help(plan.canShred ? (isChecked ? "Don't shred this item" : "Shred this item") : "This item can't be shredded")
             ItemIcon(url: URL(fileURLWithPath: plan.root), symbol: plan.isDirectory ? "folder" : "doc", size: 30)
                 .opacity(plan.canShred ? 1 : 0.5)
             VStack(alignment: .leading, spacing: 2) {
@@ -262,12 +279,15 @@ struct ToolboxShredRow: View {
         .background(RoundedRectangle(cornerRadius: Radius.row, style: .continuous).fill(hovering ? Ink.subtleFill : Color.clear))
         .onHover { hovering = $0 }
         .contextMenu {
+            if plan.canShred {
+                Button(isChecked ? "Uncheck" : "Check", action: onToggle)
+            }
             Button("Show in Finder") {
                 NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: plan.root)])
             }
             Button("Remove from List", action: onRemove)
         }
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: .contain)
     }
 
     private var detail: String {

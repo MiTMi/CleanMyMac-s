@@ -81,6 +81,15 @@ final class ToolboxScreenModel {
         route = .hub
     }
 
+    /// Files handed over from Finder ("Shred with Spruce", the Dock icon, Open With): opens
+    /// the Shredder and lists them unchecked. Nothing is shredded without the Shredder's own
+    /// confirmation.
+    func stageForShredding(_ urls: [URL]) {
+        guard !urls.isEmpty else { return }
+        open(.shredder)
+        shredder.add(urls, checked: false)
+    }
+
     // MARK: Search
 
     var results: [ToolboxTool] { ToolboxCatalog.search(query, favorites: favorites) }
@@ -253,16 +262,44 @@ final class ToolboxShredderModel {
 
     private(set) var phase: Phase = .choosing
     private(set) var plans: [ToolboxShredPlan] = []
+    /// Ids of the plans the Shred button acts on. Items picked in the Shredder (drop,
+    /// Choose…) start checked; files handed over from Finder start unchecked.
+    private(set) var checked: Set<String> = []
     private(set) var progress = ScanProgress(message: "")
     var confirming = false
 
     private let engine = ToolboxShredder()
     @ObservationIgnored private var task: Task<Void, Never>?
+    /// Items that arrived while the list was being checked or shredded; they're added once
+    /// the Shredder is free.
+    @ObservationIgnored private var waiting: [(urls: [URL], checked: Bool)] = []
 
-    var shreddable: [ToolboxShredPlan] { plans.filter(\.canShred) }
+    /// Checked items that can be shredded: what the Shred button acts on.
+    var shreddable: [ToolboxShredPlan] { plans.filter { $0.canShred && checked.contains($0.id) } }
     var shreddableBytes: Int64 { shreddable.reduce(Int64(0)) { $0 + $1.allocatedBytes } }
+    /// Items that could be checked.
+    var checkable: [ToolboxShredPlan] { plans.filter(\.canShred) }
+    /// Items that can't be shredded (each shows why).
+    var blockedCount: Int { plans.count - checkable.count }
+    var allChecked: Bool { !checkable.isEmpty && checkable.allSatisfy { checked.contains($0.id) } }
 
-    /// Shows the open panel and adds what the user picks.
+    func isChecked(_ plan: ToolboxShredPlan) -> Bool { checked.contains(plan.id) }
+
+    func toggle(_ plan: ToolboxShredPlan) {
+        guard phase == .review, plan.canShred else { return }
+        if checked.contains(plan.id) {
+            checked.remove(plan.id)
+        } else {
+            checked.insert(plan.id)
+        }
+    }
+
+    func setAllChecked(_ on: Bool) {
+        guard phase == .review else { return }
+        checked = on ? Set(checkable.map(\.id)) : []
+    }
+
+    /// Shows the open panel and adds what the user picks (checked).
     func choose() {
         let panel = NSOpenPanel()
         panel.title = "Choose Items to Shred"
@@ -277,25 +314,42 @@ final class ToolboxShredderModel {
         add(panel.urls)
     }
 
-    /// Adds dropped or chosen items and (re)checks the whole list.
-    func add(_ urls: [URL]) {
+    /// Adds dropped or chosen items (checked) or files from Finder (`checked: false`) and
+    /// (re)checks the whole list. Never shreds anything by itself.
+    func add(_ urls: [URL], checked checkAdded: Bool = true) {
         let fileURLs = urls.filter(\.isFileURL)
-        guard !fileURLs.isEmpty, phase != .shredding, phase != .inspecting else { return }
+        guard !fileURLs.isEmpty else { return }
+        switch phase {
+        case .inspecting, .shredding:
+            waiting.append((urls: fileURLs, checked: checkAdded))
+            return
+        case .done:
+            // New items replace the finished run's result screen.
+            task = nil
+        case .choosing, .review:
+            break
+        }
         let all = plans.map { URL(fileURLWithPath: $0.root) } + fileURLs
+        let previous = checked
         phase = .inspecting
         progress = ScanProgress(fraction: nil, message: "Checking the items…")
         let engine = self.engine
         let settings = SettingsStore.shared.settings
         task = Task { [weak self] in
-            let checked = await engine.plan(all, settings: settings)
-            guard let self else { return }
-            self.plans = checked
-            self.phase = checked.isEmpty ? .choosing : .review
+            let inspected = await engine.plan(all, settings: settings)
+            guard let self, !Task.isCancelled else { return }
+            self.plans = inspected
+            self.checked = ToolboxShredPlan.selection(for: inspected, previous: previous,
+                                                      added: fileURLs.map(\.path), checkAdded: checkAdded)
+            self.phase = inspected.isEmpty ? .choosing : .review
+            self.addWaiting()
         }
     }
 
     func remove(_ plan: ToolboxShredPlan) {
+        guard phase == .review || phase == .choosing else { return }
         plans.removeAll { $0.id == plan.id }
+        checked.remove(plan.id)
         if plans.isEmpty { phase = .choosing }
     }
 
@@ -318,7 +372,9 @@ final class ToolboxShredderModel {
                 HistoryStore.shared.record(outcome, kind: .clean)
             }
             guard let self else { return }
-            self.plans.removeAll { outcome.removedItemIDs.contains($0.id) }
+            let removed = Set(outcome.removedItemIDs)
+            self.plans.removeAll { removed.contains($0.id) }
+            self.checked.subtract(removed)
             self.phase = .done(outcome)
         }
     }
@@ -330,12 +386,22 @@ final class ToolboxShredderModel {
     func finish() {
         task = nil
         phase = plans.isEmpty ? .choosing : .review
+        addWaiting()
     }
 
     func clear() {
         guard phase != .shredding else { return }
         task?.cancel()
         plans = []
+        checked = []
+        waiting = []
         phase = .choosing
+    }
+
+    /// Adds the next batch that arrived while the Shredder was busy.
+    private func addWaiting() {
+        guard !waiting.isEmpty, phase == .choosing || phase == .review else { return }
+        let next = waiting.removeFirst()
+        add(next.urls, checked: next.checked)
     }
 }

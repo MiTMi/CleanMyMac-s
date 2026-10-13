@@ -85,24 +85,14 @@ struct ActivityHeader: View {
 
 // MARK: - Shared helpers
 
-/// Builds the health-score input from the live app state.
+/// The Mac Health report Activity shows, and what its cards do.
 @MainActor
 enum ActivityHealthSource {
-    static func input(_ model: AppModel, now: Date = Date()) -> ActivityHealthInput {
-        let monitor = model.monitor
-        let settings = model.settings.settings
-        // The monitor's own assessment keeps the app and the menu bar in agreement.
-        let live: [ActivitySystemIssue]? = monitor.health.isRated
-            ? monitor.health.issues.map { issue in
-                ActivitySystemIssue(kind: issue.kind.rawValue, isCritical: issue.severity == .critical,
-                                    title: issue.title, detail: issue.detail, penalty: issue.penalty)
-            }
-            : nil
-        let snapshot: SystemSnapshot? = (live == nil && monitor.hasSample) ? monitor.snapshot : nil
-        return ActivityHealthInput(snapshot: snapshot, liveIssues: live, history: model.history.history,
-                                   hasFullDiskAccess: model.hasFullDiskAccess,
-                                   realtimeProtectionEnabled: settings.realtimeProtection,
-                                   lowDiskThresholdPercent: settings.lowDiskThresholdPercent, now: now)
+    /// `AppModel.healthReport` — the one Mac Health score, shared with the sidebar pill and
+    /// the menu bar — with the user's snoozed and turned-off suggestions applied. Hiding a
+    /// card never changes the score.
+    static func report(_ model: AppModel, advice: ActivityAdviceStore, now: Date = Date()) -> ActivityHealthReport {
+        model.healthReport.applying(advice.state, now: now)
     }
 
     /// Runs a recommendation's action.

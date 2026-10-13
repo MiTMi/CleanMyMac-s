@@ -4,16 +4,20 @@ import SpruceMac
 import SwiftUI
 
 /// Health gauge on the left, recommendation cards on the right.
+///
+/// The score is `AppModel.healthReport`, the same one the sidebar pill shows; the user's
+/// snoozed and turned-off suggestions only decide which cards are listed.
 struct ActivityHealthPanel: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        let report = ActivityHealth.assess(ActivityHealthSource.input(model))
+        let advice = ActivityAdviceStore.shared
+        let report = ActivityHealthSource.report(model, advice: advice)
         GlassCard(padding: Spacing.xl) {
             HStack(alignment: .top, spacing: Spacing.xl) {
                 ActivityHealthGauge(report: report)
                     .frame(width: 210)
-                ActivityRecommendationList(report: report)
+                ActivityRecommendationList(report: report, advice: advice)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
@@ -103,23 +107,32 @@ struct ActivityHealthGauge: View {
 
 struct ActivityRecommendationList: View {
     var report: ActivityHealthReport
+    @Bindable var advice: ActivityAdviceStore
 
     @Environment(AppModel.self) private var model
     @Environment(\.colorSchemeContrast) private var contrast
     @State private var showsAll = false
+    @State private var showsHidden = false
 
     private let collapsedCount = 4
 
     var body: some View {
         VStack(alignment: .leading, spacing: Spacing.m) {
-            VStack(alignment: .leading, spacing: Spacing.xxs) {
-                Text(report.headline)
-                    .font(SpruceFont.title)
-                    .foregroundStyle(Ink.primary)
-                    .accessibilityAddTraits(.isHeader)
-                Text(statusLine)
-                    .font(SpruceFont.callout)
-                    .foregroundStyle(PrismInk(contrast).tertiary)
+            HStack(alignment: .top, spacing: Spacing.s) {
+                VStack(alignment: .leading, spacing: Spacing.xxs) {
+                    Text(report.headline)
+                        .font(SpruceFont.title)
+                        .foregroundStyle(Ink.primary)
+                        .accessibilityAddTraits(.isHeader)
+                    Text(statusLine)
+                        .font(SpruceFont.callout)
+                        .foregroundStyle(PrismInk(contrast).tertiary)
+                }
+                Spacer(minLength: Spacing.s)
+                optionsMenu
+            }
+            if !report.showsSuggestions {
+                suggestionsOffNote
             }
             if report.recommendations.isEmpty {
                 calmState
@@ -127,9 +140,12 @@ struct ActivityRecommendationList: View {
                 let visible = showsAll ? report.recommendations : Array(report.recommendations.prefix(collapsedCount))
                 VStack(spacing: Spacing.s) {
                     ForEach(visible) { rec in
-                        ActivityRecommendationCard(recommendation: rec) {
-                            ActivityHealthSource.perform(rec.action, model: model)
-                        }
+                        ActivityRecommendationCard(
+                            recommendation: rec,
+                            onAction: { ActivityHealthSource.perform(rec.action, model: model) },
+                            onSnooze: { withAnimation(Motion.standard) { advice.snooze(rec) } },
+                            onDismiss: { withAnimation(Motion.standard) { advice.dismiss(rec) } })
+                        .transition(.opacity)
                     }
                 }
                 if report.recommendations.count > collapsedCount {
@@ -138,6 +154,9 @@ struct ActivityRecommendationList: View {
                         withAnimation(Motion.standard) { showsAll.toggle() }
                     }
                 }
+            }
+            if !report.hiddenRecommendations.isEmpty {
+                hiddenSection
             }
         }
     }
@@ -155,16 +174,57 @@ struct ActivityRecommendationList: View {
         return parts.joined(separator: " · ")
     }
 
+    /// "Show Suggestions" and "Show Hidden Suggestions Again" (also offered in Settings).
+    private var optionsMenu: some View {
+        Menu {
+            Toggle("Show Suggestions", isOn: $advice.showSuggestions)
+            Divider()
+            Button("Show Hidden Suggestions Again") {
+                withAnimation(Motion.standard) { advice.restoreAll() }
+            }
+            .disabled(advice.holdCount() == 0)
+        } label: {
+            Image(systemName: "ellipsis.circle")
+                .font(.system(size: 15))
+                .foregroundStyle(PrismInk(contrast).secondary)
+        }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("Suggestion options")
+        .accessibilityLabel("Suggestion options")
+    }
+
+    private var suggestionsOffNote: some View {
+        HStack(spacing: Spacing.s) {
+            Image(systemName: "bell.slash")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(PrismInk(contrast).tertiary)
+            Text("Suggestions are off. Only critical problems are listed.")
+                .font(SpruceFont.caption)
+                .foregroundStyle(PrismInk(contrast).secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: Spacing.s)
+            PrismTextButton(title: "Turn On", module: .activity) {
+                withAnimation(Motion.standard) { advice.showSuggestions = true }
+            }
+        }
+    }
+
     private var calmState: some View {
-        HStack(alignment: .top, spacing: Spacing.m) {
-            Image(systemName: "checkmark.seal.fill")
+        let hidesSome = !report.hiddenRecommendations.isEmpty
+        return HStack(alignment: .top, spacing: Spacing.m) {
+            Image(systemName: hidesSome ? "checkmark.circle" : "checkmark.seal.fill")
                 .font(.system(size: 22))
-                .foregroundStyle(StatusColor.success)
+                .foregroundStyle(hidesSome ? StatusColor.info : StatusColor.success)
             VStack(alignment: .leading, spacing: Spacing.xxs) {
-                Text("Nothing needs your attention.")
+                Text(hidesSome ? "Nothing new needs your attention." : "Nothing needs your attention.")
                     .font(SpruceFont.bodyStrong)
                     .foregroundStyle(Ink.primary)
-                Text("Storage, memory, temperature, threats and upkeep all look fine. Suggestions appear here when something changes.")
+                Text(hidesSome
+                     ? "The remaining suggestions are hidden. They still count toward the score until they're fixed."
+                     : "Storage, memory, temperature, threats and upkeep all look fine. Suggestions appear here when something changes.")
                     .font(SpruceFont.callout)
                     .foregroundStyle(PrismInk(contrast).secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -172,16 +232,43 @@ struct ActivityRecommendationList: View {
         }
         .padding(Spacing.m)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .prismSurface(radius: Radius.row, tint: StatusColor.success)
+        .prismSurface(radius: Radius.row, tint: hidesSome ? StatusColor.info : StatusColor.success)
+    }
+
+    /// Snoozed, turned-off and muted cards: still part of the score, listed on request.
+    private var hiddenSection: some View {
+        let hidden = report.hiddenRecommendations
+        let now = Date()
+        return VStack(alignment: .leading, spacing: Spacing.s) {
+            PrismTextButton(title: hidden.count == 1 ? "1 hidden suggestion" : "\(hidden.count) hidden suggestions",
+                            symbol: showsHidden ? "chevron.up" : "chevron.down", module: .activity) {
+                withAnimation(Motion.standard) { showsHidden.toggle() }
+            }
+            .accessibilityHint(showsHidden ? "Hides the list" : "Lists suggestions you snoozed or turned off")
+            if showsHidden {
+                VStack(spacing: Spacing.xs) {
+                    ForEach(hidden) { rec in
+                        ActivityHiddenRecommendationRow(recommendation: rec, hold: advice.hold(for: rec, now: now)) {
+                            withAnimation(Motion.standard) { advice.restore(rec) }
+                        }
+                    }
+                }
+                .transition(.opacity)
+            }
+        }
     }
 }
 
-/// One suggestion: status-tinted icon, title, reason and one action.
+/// One suggestion: status-tinted icon, title, reason, one action and a ⋯ menu
+/// (snooze, don't suggest again, why am I seeing this?).
 struct ActivityRecommendationCard: View {
     var recommendation: ActivityRecommendation
     var onAction: () -> Void
+    var onSnooze: () -> Void = {}
+    var onDismiss: () -> Void = {}
 
     @State private var hovering = false
+    @State private var explaining = false
     @Environment(\.colorSchemeContrast) private var contrast
 
     var body: some View {
@@ -194,6 +281,7 @@ struct ActivityRecommendationCard: View {
                 .frame(width: 34, height: 34)
                 .background(Circle().fill(tint.opacity(0.16)))
                 .overlay(Circle().strokeBorder(tint.opacity(0.30), lineWidth: 1))
+                .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
                 Text(recommendation.title)
                     .font(SpruceFont.bodyStrong)
@@ -205,17 +293,126 @@ struct ActivityRecommendationCard: View {
                     .lineLimit(2)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            .accessibilityElement(children: .combine)
             Spacer(minLength: Spacing.s)
             if recommendation.isActionable {
                 CapsuleButton(title: recommendation.actionTitle, prominent: recommendation.severity == .critical,
                               action: onAction)
             }
+            cardMenu
         }
         .padding(.horizontal, Spacing.m)
         .padding(.vertical, Spacing.s)
         .prismSurface(radius: Radius.row, highlighted: hovering)
         .onHover { hovering = $0 }
         .animation(Motion.quick, value: hovering)
-        .accessibilityElement(children: .combine)
+        .contextMenu { menuItems }
+        .accessibilityElement(children: .contain)
+    }
+
+    @ViewBuilder
+    private var menuItems: some View {
+        if recommendation.canSnooze {
+            Button(recommendation.snoozeTitle, action: onSnooze)
+        }
+        if recommendation.canDismiss {
+            Button("Don't Suggest This Again", action: onDismiss)
+        }
+        if recommendation.canSnooze || recommendation.canDismiss {
+            Divider()
+        }
+        Button("Why Am I Seeing This?") { explaining = true }
+    }
+
+    private var cardMenu: some View {
+        Menu {
+            menuItems
+        } label: {
+            Image(systemName: "ellipsis")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(hovering ? Ink.primary : PrismInk(contrast).tertiary)
+                .frame(width: 24, height: 24)
+                .contentShape(Rectangle())
+        }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help(recommendation.isPinned ? "Why am I seeing this?" : "Snooze, hide or explain this suggestion")
+        .accessibilityLabel("More options for \(recommendation.title)")
+        .popover(isPresented: $explaining, arrowEdge: .bottom) {
+            ActivityRecommendationExplanation(recommendation: recommendation)
+        }
+    }
+}
+
+/// "Why am I seeing this?": what triggered the card, what it costs the score and how
+/// hiding it works.
+struct ActivityRecommendationExplanation: View {
+    var recommendation: ActivityRecommendation
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Spacing.s) {
+            Text("Why am I seeing this?")
+                .font(SpruceFont.headline)
+            Text(recommendation.title)
+                .font(SpruceFont.callout.weight(.semibold))
+                .fixedSize(horizontal: false, vertical: true)
+            ForEach(Array(recommendation.explanation.enumerated()), id: \.offset) { index, paragraph in
+                Text(paragraph)
+                    .font(index == 0 ? SpruceFont.callout : SpruceFont.caption)
+                    .foregroundStyle(index == 0 ? Color.primary : Color.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(Spacing.l)
+        .frame(width: 340, alignment: .leading)
+    }
+}
+
+/// A hidden suggestion: dimmed, with why it's hidden and (for snoozed or turned-off
+/// cards) "Show Again".
+struct ActivityHiddenRecommendationRow: View {
+    var recommendation: ActivityRecommendation
+    /// Nil when the card is hidden only because suggestions are off.
+    var hold: ActivityAdviceHold?
+    var onRestore: () -> Void
+
+    @Environment(\.colorSchemeContrast) private var contrast
+
+    var body: some View {
+        let ink = PrismInk(contrast)
+        HStack(spacing: Spacing.m) {
+            Image(systemName: recommendation.symbol)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(ink.tertiary)
+                .frame(width: 26, height: 26)
+                .background(Circle().fill(Ink.subtleFill))
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(recommendation.title)
+                    .font(SpruceFont.body)
+                    .foregroundStyle(Ink.secondary)
+                    .lineLimit(1)
+                Text(status)
+                    .font(SpruceFont.caption)
+                    .foregroundStyle(ink.tertiary)
+                    .lineLimit(1)
+            }
+            .accessibilityElement(children: .combine)
+            Spacer(minLength: Spacing.s)
+            if hold != nil {
+                PrismTextButton(title: "Show Again", module: .activity, action: onRestore)
+            }
+        }
+        .padding(.horizontal, Spacing.m)
+        .padding(.vertical, Spacing.xs)
+        .accessibilityElement(children: .contain)
+    }
+
+    private var status: String {
+        guard let hold else { return "Hidden while suggestions are off" }
+        guard let until = hold.until else { return "Turned off · still counts toward the score" }
+        return "Snoozed · back \(until.formatted(.relative(presentation: .named)))"
     }
 }

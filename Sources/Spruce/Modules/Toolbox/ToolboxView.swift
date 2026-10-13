@@ -25,8 +25,12 @@ struct ToolboxRootScreen: View {
                 .transition(.prismPhase(reduceMotion: reduceMotion))
         }
         .animation(Motion.adaptive(Motion.standard, reduceMotion: reduceMotion), value: routeKey)
-        .onAppear { consumePendingTool() }
+        .onAppear {
+            consumePendingTool()
+            consumePendingFiles()
+        }
         .onChange(of: model.pendingTool) { _, _ in consumePendingTool() }
+        .onChange(of: model.pendingFiles) { _, _ in consumePendingFiles() }
     }
 
     private var routeKey: String {
@@ -58,6 +62,18 @@ struct ToolboxRootScreen: View {
         guard let toolID = model.pendingTool, let tool = ToolboxLocalTool(toolID: toolID) else { return }
         model.pendingTool = nil
         screen.open(tool)
+        // Files that came with the navigation are staged once the tool is open.
+        consumePendingFiles()
+    }
+
+    /// Files from Finder ("Shred with Spruce", the Dock icon, Open With) that
+    /// `AppModel.openFiles` sent to the Toolbox: the Shredder is its only file destination.
+    /// They're listed unchecked; shredding still needs the Shredder's confirmation.
+    private func consumePendingFiles() {
+        guard model.selection == .toolbox, !model.pendingFiles.isEmpty else { return }
+        let files = model.pendingFiles
+        model.pendingFiles = []
+        screen.stageForShredding(files)
     }
 }
 

@@ -235,3 +235,46 @@ public struct ToolboxShredPlan: Identifiable, Equatable, Sendable {
         return parts.joined(separator: " · ")
     }
 }
+
+// MARK: - Shredder selection
+
+public extension ToolboxShredPlan {
+    /// "/a/b/" → "/a/b": the form a plan's `root` (and so its `id`) takes.
+    static func normalizedRoot(_ path: String) -> String {
+        var root = path
+        while root.count > 1 && root.hasSuffix("/") { root.removeLast() }
+        return root
+    }
+
+    /// The checked items after the list was (re)checked. Items that were checked stay
+    /// checked; items just added are checked only when `checkAdded` is true (picked in the
+    /// Shredder itself). Files handed over from Finder (Services, the Dock icon, Open With)
+    /// are added with `checkAdded` false, so they wait unchecked for the user. Items that
+    /// can't be shredded are never checked.
+    static func selection(for plans: [ToolboxShredPlan], previous: Set<String>, added: [String],
+                          checkAdded: Bool) -> Set<String> {
+        // Case-insensitive, like the Shredder's own de-duplication (APFS default).
+        let addedRoots = Set(added.map { normalizedRoot($0).lowercased() })
+        var result = Set<String>()
+        for plan in plans where plan.canShred {
+            if previous.contains(plan.id) || (checkAdded && addedRoots.contains(plan.id.lowercased())) {
+                result.insert(plan.id)
+            }
+        }
+        return result
+    }
+
+    /// "2 of 3 checked · 1.2 GB" (only items that can be shredded are counted).
+    static func selectionSummary(_ plans: [ToolboxShredPlan], checked: Set<String>) -> String {
+        let usable = plans.filter(\.canShred)
+        guard !usable.isEmpty else { return "Nothing to shred" }
+        let chosen = usable.filter { checked.contains($0.id) }
+        if chosen.isEmpty { return "None of \(CountFormat.items(usable.count)) checked" }
+        let bytes = chosen.reduce(Int64(0)) { $0 + $1.allocatedBytes }
+        if chosen.count == usable.count {
+            return usable.count == 1 ? "1 item checked · \(ByteFormat.string(bytes))"
+                : "All \(usable.count) items checked · \(ByteFormat.string(bytes))"
+        }
+        return "\(chosen.count) of \(usable.count) checked · \(ByteFormat.string(bytes))"
+    }
+}
