@@ -19,16 +19,19 @@ enum CloudStorageThreadRunner {
     /// - Parameter allowMaterialization: leave the default policy in place (for calls that
     ///   ask macOS to evict or download, which must not be blocked themselves).
     static func run<T: Sendable>(allowMaterialization: Bool = false, _ body: @escaping @Sendable () -> T) async -> T {
-        await withCheckedContinuation { (continuation: CheckedContinuation<T, Never>) in
+        let type = iopolTypeMaterialize
+        let scope = iopolScopeThread
+        let off = iopolMaterializeOff
+        return await withCheckedContinuation { (continuation: CheckedContinuation<T, Never>) in
             let thread = Thread {
                 var previous: Int32 = -1
                 if !allowMaterialization {
-                    previous = getiopolicy_np(iopolTypeMaterialize, iopolScopeThread)
-                    _ = setiopolicy_np(iopolTypeMaterialize, iopolScopeThread, iopolMaterializeOff)
+                    previous = getiopolicy_np(type, scope)
+                    _ = setiopolicy_np(type, scope, off)
                 }
                 let value = body()
                 if previous >= 0 {
-                    _ = setiopolicy_np(iopolTypeMaterialize, iopolScopeThread, previous)
+                    _ = setiopolicy_np(type, scope, previous)
                 }
                 continuation.resume(returning: value)
             }
@@ -102,10 +105,10 @@ enum CloudStorageMetadata {
             var record = record
             if mechanism != .syncFolder {
                 record.status = status(at: record.path, keepingRequest: record.status)
-                if mechanism == .iCloud, !record.isPackage, let download = record.status.download {
-                    if download == .notDownloaded && !record.isCloudOnly && record.allocatedSize == 0 {
-                        record.isCloudOnly = true
-                    }
+                // iCloud says "not downloaded" but a small stub is still allocated.
+                if mechanism == .iCloud, !record.isPackage, !record.isCloudOnly,
+                   record.status.download == .notDownloaded, record.allocatedSize * 16 <= record.logicalSize {
+                    record.isCloudOnly = true
                 }
             }
             if record.lastUsed == nil { record.lastUsed = lastUsed(at: record.path) }

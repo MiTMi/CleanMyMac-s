@@ -77,9 +77,10 @@ public final class CloudStorageEngine: @unchecked Sendable {
 
     // MARK: Providers
 
-    /// Cloud folders on this Mac, iCloud Drive first.
-    public func detectProviders(home: String = NSHomeDirectory()) -> [CloudStorageProvider] {
-        CloudStorageDiscovery.discover(home: home)
+    /// Cloud folders on this Mac, iCloud Drive first. Runs off the main thread with
+    /// downloads disabled, so an online-only app container can never stall it.
+    public func detectProviders(home: String = NSHomeDirectory()) async -> [CloudStorageProvider] {
+        await CloudStorageThreadRunner.run { CloudStorageDiscovery.discover(home: home) }
     }
 
     /// Whether a downloaded file is suggested, allowed or blocked.
@@ -131,7 +132,7 @@ public final class CloudStorageEngine: @unchecked Sendable {
                 }
                 var results: [(Int, CloudStorageProviderReport)] = []
                 for await result in group { results.append(result) }
-                return results.sorted { $0.0 < $1.0 }.map(\.1)
+                return results.sorted { $0.0 < $1.0 }.map { $0.1 }
             }
         } onCancel: {
             flag.cancel()
@@ -485,6 +486,6 @@ public final class CloudStorageEngine: @unchecked Sendable {
     /// Opens a provider's folder in Finder.
     @MainActor
     public func openInFinder(_ provider: CloudStorageProvider) {
-        NSWorkspace.shared.open(URL(fileURLWithPath: provider.rootPath, isDirectory: true))
+        _ = NSWorkspace.shared.open(URL(fileURLWithPath: provider.rootPath, isDirectory: true))
     }
 }
