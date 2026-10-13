@@ -66,17 +66,17 @@ enum VirusTotalFixture {
 }
 
 final class ProtectionVirusTotalTests: XCTestCase {
-    let hash = VirusTotalFixture.hash
+    let sha256 = VirusTotalFixture.hash
 
     func parse(_ status: Int, _ body: String) -> VirusTotalLookupResult {
-        VirusTotalAPI.parse(statusCode: status, body: Data(body.utf8), sha256: hash)
+        VirusTotalAPI.parse(statusCode: status, body: Data(body.utf8), sha256: sha256)
     }
 
     func testMaliciousReportIsFlagged() throws {
         guard case .found(let report) = parse(200, VirusTotalFixture.malicious) else {
             return XCTFail("Expected a report")
         }
-        XCTAssertEqual(report.sha256, hash)
+        XCTAssertEqual(report.sha256, sha256)
         XCTAssertEqual(report.stats.malicious, 45)
         XCTAssertEqual(report.stats.typeUnsupported, 7)
         XCTAssertEqual(report.stats.confirmedTimeout, 0)
@@ -88,17 +88,17 @@ final class ProtectionVirusTotalTests: XCTestCase {
         XCTAssertEqual(report.lastAnalysisDate, Date(timeIntervalSince1970: 1_759_900_000))
 
         let checked = Date(timeIntervalSince1970: 1_760_000_000)
-        let verdict = try XCTUnwrap(parse(200, VirusTotalFixture.malicious).verdict(checked: checked, sha256: hash))
+        let verdict = try XCTUnwrap(parse(200, VirusTotalFixture.malicious).verdict(checked: checked, sha256: sha256))
         XCTAssertEqual(verdict.level, .flagged)
         XCTAssertEqual(verdict.title, "Flagged by 45 of 66 engines")
         XCTAssertEqual(verdict.detail, "45 of 66 security engines on VirusTotal flag this file as malicious. Most call it trojan.adload/macos.")
         XCTAssertEqual(verdict.reason, "VirusTotal: flagged by 45 of 66 engines")
-        XCTAssertEqual(verdict.link?.absoluteString, "https://www.virustotal.com/gui/file/\(hash)")
+        XCTAssertEqual(verdict.link?.absoluteString, "https://www.virustotal.com/gui/file/\(sha256)")
         XCTAssertEqual(verdict.checked, checked)
     }
 
     func testCleanReportAndOtherLevels() throws {
-        let clean = try XCTUnwrap(parse(200, VirusTotalFixture.clean).verdict(sha256: hash))
+        let clean = try XCTUnwrap(parse(200, VirusTotalFixture.clean).verdict(sha256: sha256))
         XCTAssertEqual(clean.level, .clean)
         XCTAssertEqual(clean.title, "No engine flags this")
         XCTAssertEqual(clean.detail, "None of the 58 security engines on VirusTotal flag this file.")
@@ -106,7 +106,7 @@ final class ProtectionVirusTotalTests: XCTestCase {
         XCTAssertNil(clean.threatLabel)
 
         func verdict(_ stats: VirusTotalAnalysisStats) -> VirusTotalVerdict {
-            VirusTotalVerdict(report: VirusTotalFileReport(sha256: hash, stats: stats))
+            VirusTotalVerdict(report: VirusTotalFileReport(sha256: sha256, stats: stats))
         }
         let two = verdict(VirusTotalAnalysisStats(malicious: 2, undetected: 60))
         XCTAssertEqual(two.level, .someFlags)
@@ -120,10 +120,10 @@ final class ProtectionVirusTotalTests: XCTestCase {
         XCTAssertEqual(pending.level, .unknown)
         XCTAssertEqual(pending.title, "No results yet")
 
-        let unknown = try XCTUnwrap(parse(404, VirusTotalFixture.notFound).verdict(sha256: hash.uppercased()))
+        let unknown = try XCTUnwrap(parse(404, VirusTotalFixture.notFound).verdict(sha256: sha256.uppercased()))
         XCTAssertEqual(unknown.level, .unknown)
         XCTAssertFalse(unknown.isKnown)
-        XCTAssertEqual(unknown.sha256, hash)
+        XCTAssertEqual(unknown.sha256, sha256)
         XCTAssertEqual(unknown.title, "Not known to VirusTotal")
         XCTAssertEqual(unknown.reason, "VirusTotal: not known to VirusTotal")
     }
@@ -133,7 +133,7 @@ final class ProtectionVirusTotalTests: XCTestCase {
         XCTAssertEqual(parse(429, VirusTotalFixture.quota), .rateLimited)
         XCTAssertEqual(parse(401, VirusTotalFixture.wrongKey), .invalidKey)
         XCTAssertEqual(parse(403, VirusTotalFixture.forbidden), .invalidKey)
-        XCTAssertNil(parse(429, VirusTotalFixture.quota).verdict(sha256: hash))
+        XCTAssertNil(parse(429, VirusTotalFixture.quota).verdict(sha256: sha256))
         XCTAssertNotNil(VirusTotalLookupResult.invalidKey.errorMessage)
         XCTAssertNil(VirusTotalLookupResult.notFound.errorMessage)
         if case .failed(let message) = parse(503, "<html>busy</html>") {
@@ -149,13 +149,13 @@ final class ProtectionVirusTotalTests: XCTestCase {
         if case .failed = parse(200, "not json") {} else { XCTFail("Garbage isn't a report") }
         if case .failed = parse(200, #"{"error": null}"#) {} else { XCTFail("No data isn't a report") }
         let other = String(repeating: "f", count: 64)
-        if case .failed(let message) = parse(200, VirusTotalFixture.clean.replacingOccurrences(of: hash, with: other)) {
+        if case .failed(let message) = parse(200, VirusTotalFixture.clean.replacingOccurrences(of: sha256, with: other)) {
             XCTAssertTrue(message.contains("different file"))
         } else {
             XCTFail("A report about another file is refused")
         }
         // Odd field types don't hide the verdict.
-        let odd = #"{"data": {"id": "\#(hash)", "attributes": {"meaningful_name": 5, "reputation": "bad", "#
+        let odd = #"{"data": {"id": "\#(sha256)", "attributes": {"meaningful_name": 5, "reputation": "bad", "#
             + #""last_analysis_date": 1759000000.5, "last_analysis_stats": {"malicious": 4, "undetected": "x"}}}}"#
         guard case .found(let report) = parse(200, odd) else { return XCTFail("Expected a report") }
         XCTAssertEqual(report.stats.malicious, 4)
@@ -166,9 +166,9 @@ final class ProtectionVirusTotalTests: XCTestCase {
     }
 
     func testAddresses() {
-        XCTAssertEqual(VirusTotalAPI.fileReportURL(sha256: hash.uppercased())?.absoluteString,
-                       "https://www.virustotal.com/api/v3/files/\(hash)")
-        XCTAssertEqual(VirusTotalAPI.guiURL(sha256: " \(hash)\n")?.absoluteString, "https://www.virustotal.com/gui/file/\(hash)")
+        XCTAssertEqual(VirusTotalAPI.fileReportURL(sha256: sha256.uppercased())?.absoluteString,
+                       "https://www.virustotal.com/api/v3/files/\(sha256)")
+        XCTAssertEqual(VirusTotalAPI.guiURL(sha256: " \(sha256)\n")?.absoluteString, "https://www.virustotal.com/gui/file/\(sha256)")
         XCTAssertNil(VirusTotalAPI.fileReportURL(sha256: "abc"))
         XCTAssertNil(VirusTotalAPI.guiURL(sha256: "../../etc/passwd" + String(repeating: "a", count: 48)))
         XCTAssertEqual(VirusTotalAPI.keyHeader, "x-apikey")
@@ -217,13 +217,13 @@ final class ProtectionVirusTotalTests: XCTestCase {
                                               evidence: .heuristic, reasons: ["Unsigned program in a hidden folder"],
                                               kind: .executable, path: "/Users/me/x", programPath: "/Users/me/x")
         let checked = Date(timeIntervalSince1970: 1_760_000_000)
-        let clean = try XCTUnwrap(parse(200, VirusTotalFixture.clean).verdict(checked: checked, sha256: hash))
+        let clean = try XCTUnwrap(parse(200, VirusTotalFixture.clean).verdict(checked: checked, sha256: sha256))
         finding.applyVirusTotal(clean)
         XCTAssertEqual(finding.reasons, ["Unsigned program in a hidden folder", "VirusTotal: no engine flags this"])
         XCTAssertEqual(finding.severity, .medium)
-        XCTAssertEqual(finding.sha256, hash)
+        XCTAssertEqual(finding.sha256, sha256)
 
-        let flagged = try XCTUnwrap(parse(200, VirusTotalFixture.malicious).verdict(checked: checked, sha256: hash))
+        let flagged = try XCTUnwrap(parse(200, VirusTotalFixture.malicious).verdict(checked: checked, sha256: sha256))
         finding.applyVirusTotal(flagged)
         XCTAssertEqual(finding.reasons, ["Unsigned program in a hidden folder", "VirusTotal: flagged by 45 of 66 engines"])
         XCTAssertEqual(finding.severity, .high)
@@ -256,7 +256,7 @@ final class ProtectionVirusTotalTests: XCTestCase {
 
         var full = finding
         full.ruleHits = [ProtectionRuleHit(source: "Apple XProtect", rule: "XProtect_MACOS_ADLOAD_D", detail: "MACOS.ADLOAD.D")]
-        full.virusTotal = VirusTotalVerdict.notFound(sha256: hash, checked: Date(timeIntervalSince1970: 1_000))
+        full.virusTotal = VirusTotalVerdict.notFound(sha256: sha256, checked: Date(timeIntervalSince1970: 1_000))
         full.programPath = "/x"
         let data = try JSONEncoder().encode(full)
         XCTAssertEqual(try JSONDecoder().decode(ProtectionThreatFinding.self, from: data), full)
