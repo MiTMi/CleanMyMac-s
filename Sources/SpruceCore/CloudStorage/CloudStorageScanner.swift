@@ -35,6 +35,16 @@ public struct CloudStorageScanOptions: Sendable {
     }
 }
 
+/// Whether an item's contents are on this Mac right now.
+public enum CloudStorageAvailability: Sendable, Equatable {
+    /// Every byte is downloaded: reading it can't start a download.
+    case local
+    /// All or part of it is stored only in the cloud.
+    case cloud
+    /// It no longer exists (or is now a symbolic link).
+    case missing
+}
+
 /// Walks a provider's folders and measures local versus cloud-only content.
 ///
 /// * Blocking and single-threaded: the Mac engine runs it on a dedicated thread with
@@ -306,6 +316,33 @@ public enum CloudStorageScanner {
             linkCount: Int(st.st_nlink),
             flagDataless: dataless
         )
+    }
+
+    /// Whether an item's contents are on this Mac right now, so reading it (Quick Look,
+    /// opening) can't start a download. A package counts as local only when nothing
+    /// inside it is online-only; folders inside it that can't be listed count as
+    /// online-only. Never follows symlinks and never enters online-only folders (the
+    /// Mac engine still calls it on a thread with downloads switched off).
+    public static func availability(at path: String) -> CloudStorageAvailability {
+        guard let info = statInfo(path), !info.isSymlink else { return .missing }
+        if info.isRegular { return info.isDataless ? .cloud : .local }
+        guard info.isDirectory else { return .missing }
+        if info.flagDataless { return .cloud }
+        var stack = [path]
+        while let dir = stack.popLast() {
+            guard let names = try? FileManager.default.contentsOfDirectory(atPath: dir) else { return .cloud }
+            for name in names {
+                let child = dir + "/" + name
+                guard let childInfo = statInfo(child), !childInfo.isSymlink else { continue }
+                if childInfo.isDirectory {
+                    if childInfo.flagDataless { return .cloud }
+                    if childInfo.device == info.device { stack.append(child) }
+                } else if childInfo.isRegular, childInfo.isDataless {
+                    return .cloud
+                }
+            }
+        }
+        return .local
     }
 
     /// Re-measures one file or package after an action (free up / download).

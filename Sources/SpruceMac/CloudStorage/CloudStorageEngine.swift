@@ -75,6 +75,19 @@ public final class CloudStorageEngine: @unchecked Sendable {
         lock.unlock()
     }
 
+    /// Drops listed files that are on the ignore list from the stored results, out of
+    /// the lists and the totals as a new scan would, and returns the reports. Call it
+    /// after adding to the ignore list ("Ignore from Now On") or when a scan that began
+    /// before such a change finishes.
+    @discardableResult
+    public func dropIgnored(_ settings: SpruceSettings) -> [CloudStorageProviderReport] {
+        lock.lock()
+        defer { lock.unlock() }
+        let threshold = largeFileThreshold
+        storedReports = storedReports.map { $0.removingIgnored(settings, largeThreshold: threshold) }
+        return storedReports
+    }
+
     // MARK: Providers
 
     /// Cloud folders on this Mac, iCloud Drive first. Runs off the main thread with
@@ -180,8 +193,7 @@ public final class CloudStorageEngine: @unchecked Sendable {
         var report = CloudStorageScanner.scan(provider, options: options, isCancelled: { flag.isCancelled },
                                               progress: progress)
         if !ignoredIDs.isEmpty {
-            report.largestLocal.removeAll { ignoredIDs.contains($0.id) }
-            report.largestCloudOnly.removeAll { ignoredIDs.contains($0.id) }
+            report = report.removing(where: { ignoredIDs.contains($0.id) }, largeThreshold: threshold)
         }
         guard !flag.isCancelled else { return report }
 
@@ -478,6 +490,24 @@ public final class CloudStorageEngine: @unchecked Sendable {
             return mine.isEmpty ? report : report.applying(mine, largeThreshold: largeFileThreshold)
         }
         return storedReports
+    }
+
+    // MARK: Quick Look
+
+    /// Whether a listed item can be previewed without downloading anything: it still
+    /// exists and every byte of it (every file inside a package) is on this Mac. Checked
+    /// right before previewing, on a thread that can't download, because macOS may have
+    /// removed the local copy since the scan and Quick Look would fetch it again.
+    public func previewAvailability(of record: CloudStorageFileRecord,
+                                    in provider: CloudStorageProvider) async -> CloudStorageAvailability {
+        let path = record.path
+        let mechanism = provider.mechanism
+        return await CloudStorageThreadRunner.run { () -> CloudStorageAvailability in
+            let availability = CloudStorageScanner.availability(at: path)
+            guard availability == .local, mechanism != .syncFolder else { return availability }
+            // The provider's own word wins when it says the copy isn't here.
+            return CloudStorageMetadata.status(at: path).download == .notDownloaded ? .cloud : .local
+        }
     }
 
     // MARK: Finder

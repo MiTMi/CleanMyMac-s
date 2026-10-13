@@ -239,6 +239,41 @@ public struct CloudStorageProviderReport: Identifiable, Hashable, Sendable, Coda
         result.largestCloudOnly = CloudStorageRanking.sorted(cloud + movedToCloud, by: .logical)
         return result
     }
+
+    /// The report without the listed files `isRemoved` matches, taken out of the totals
+    /// too — what a scan that skipped them would have reported.
+    public func removing(where isRemoved: (CloudStorageFileRecord) -> Bool,
+                         largeThreshold: Int64) -> CloudStorageProviderReport {
+        var result = self
+        var local: [CloudStorageFileRecord] = []
+        for record in largestLocal {
+            if isRemoved(record) {
+                result.stats.remove(record, largeThreshold: largeThreshold)
+            } else {
+                local.append(record)
+            }
+        }
+        var cloud: [CloudStorageFileRecord] = []
+        for record in largestCloudOnly {
+            if isRemoved(record) {
+                result.stats.remove(record, largeThreshold: largeThreshold)
+            } else {
+                cloud.append(record)
+            }
+        }
+        result.largestLocal = local
+        result.largestCloudOnly = cloud
+        return result
+    }
+
+    /// The report without listed files that are on the ignore list (by path, or by item
+    /// id, which is the path here), as a new scan with these settings would show it.
+    public func removingIgnored(_ settings: SpruceSettings, largeThreshold: Int64) -> CloudStorageProviderReport {
+        guard !settings.ignoredPaths.isEmpty || !settings.ignoredItemIDs.isEmpty else { return self }
+        let ids = Set(settings.ignoredItemIDs)
+        return removing(where: { ids.contains($0.id) || settings.isIgnored(path: $0.path) },
+                        largeThreshold: largeThreshold)
+    }
 }
 
 extension CloudStorageStats {

@@ -178,4 +178,65 @@ final class CloudStorageScannerTests: XCTestCase {
         try fm.removeItem(atPath: trip.path)
         XCTAssertNil(CloudStorageScanner.remeasure(trip))
     }
+
+    // MARK: Ignore from now on
+
+    func testRemovingTakesFilesOutOfListsAndTotals() throws {
+        let report = scan()
+        let trip = try XCTUnwrap(report.largestLocal.first { $0.name == "trip.mov" })
+        let archive = try XCTUnwrap(report.largestCloudOnly.first { $0.name == "archive.mov" })
+        let removed = report.removing(where: { $0.path == trip.path || $0.path == archive.path },
+                                      largeThreshold: 2_000_000)
+
+        XCTAssertFalse(removed.largestLocal.contains { $0.path == trip.path })
+        XCTAssertFalse(removed.largestCloudOnly.contains { $0.path == archive.path })
+        XCTAssertEqual(removed.largestLocal.count, report.largestLocal.count - 1)
+        XCTAssertEqual(removed.largestCloudOnly.map(\.name), ["old.zip"])
+        XCTAssertEqual(removed.stats.localBytes, report.stats.localBytes - trip.localBytes)
+        XCTAssertEqual(removed.stats.localFileCount, report.stats.localFileCount - 1)
+        XCTAssertEqual(removed.stats.largeLocalCount, report.stats.largeLocalCount - 1)
+        XCTAssertEqual(removed.stats.cloudOnlyBytes, report.stats.cloudOnlyBytes - archive.logicalSize)
+        XCTAssertEqual(removed.stats.cloudOnlyFileCount, report.stats.cloudOnlyFileCount - 1)
+        XCTAssertEqual(removed.stats.fileCount, report.stats.fileCount - 2)
+        XCTAssertEqual(removed.stats.cloudBytes, report.stats.cloudBytes - trip.cloudBytes - archive.cloudBytes)
+
+        let untouched = report.removing(where: { _ in false }, largeThreshold: 2_000_000)
+        XCTAssertEqual(untouched, report)
+    }
+
+    func testRemovingIgnoredMatchesAScanWithTheIgnoreList() throws {
+        let report = scan()
+        var settings = SpruceSettings()
+        XCTAssertEqual(report.removingIgnored(settings, largeThreshold: 2_000_000), report,
+                       "an empty ignore list changes nothing")
+
+        settings.ignoredPaths = [root + "/Videos"]
+        settings.ignoredItemIDs = [root + "/Docs/notes.txt"]
+        let ignoreList = settings
+        let filtered = report.removingIgnored(ignoreList, largeThreshold: 2_000_000)
+        let rescanned = scan(CloudStorageScanOptions(largeFileThreshold: 2_000_000,
+                                                     isIgnored: { ignoreList.isIgnored(path: $0) }))
+
+        XCTAssertFalse(filtered.largestLocal.contains { $0.name == "trip.mov" })
+        XCTAssertFalse(filtered.largestCloudOnly.contains { $0.name == "archive.mov" })
+        XCTAssertFalse(filtered.largestLocal.contains { $0.path == root + "/Docs/notes.txt" })
+        XCTAssertEqual(filtered.largestCloudOnly.map(\.name), rescanned.largestCloudOnly.map(\.name))
+        XCTAssertEqual(filtered.stats.cloudOnlyBytes, rescanned.stats.cloudOnlyBytes)
+        XCTAssertEqual(filtered.stats.cloudOnlyFileCount, rescanned.stats.cloudOnlyFileCount)
+        XCTAssertEqual(filtered.stats.largeLocalCount, rescanned.stats.largeLocalCount)
+    }
+
+    // MARK: Quick Look availability
+
+    func testAvailabilityTellsLocalFromOnlineOnly() throws {
+        XCTAssertEqual(CloudStorageScanner.availability(at: root + "/Videos/trip.mov"), .local)
+        XCTAssertEqual(CloudStorageScanner.availability(at: root + "/Videos/archive.mov"), .cloud)
+        XCTAssertEqual(CloudStorageScanner.availability(at: root + "/Report.pages"), .local)
+        XCTAssertEqual(CloudStorageScanner.availability(at: root + "/nothing-here.mov"), .missing)
+        XCTAssertEqual(CloudStorageScanner.availability(at: root + "/Link.mov"), .missing, "symlinks are never followed")
+
+        // A package with one online-only file inside isn't fully on this Mac.
+        try sparse(root + "/Report.pages/Data/preview.png", bytes: 1_000_000)
+        XCTAssertEqual(CloudStorageScanner.availability(at: root + "/Report.pages"), .cloud)
+    }
 }

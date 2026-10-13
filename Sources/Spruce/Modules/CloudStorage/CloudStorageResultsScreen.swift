@@ -307,7 +307,9 @@ struct CloudStorageFileList: View {
             onToggle: { screen.toggle(record, provider: provider) },
             onReveal: { screen.reveal([record]) },
             onFreeUp: { screen.requestFreeUp(record, provider: provider) },
-            onDownload: { screen.download([record]) }
+            onDownload: { screen.download([record]) },
+            onQuickLook: { screen.quickLook(record, provider: provider) },
+            onIgnore: { screen.requestIgnore(record) }
         )
     }
 

@@ -215,6 +215,9 @@ struct CloudStorageFileRow: View {
     let onReveal: () -> Void
     let onFreeUp: () -> Void
     let onDownload: () -> Void
+    /// Previews the file; only offered for files that are on this Mac.
+    let onQuickLook: () -> Void
+    let onIgnore: () -> Void
 
     @State private var hovering = false
 
@@ -258,7 +261,13 @@ struct CloudStorageFileRow: View {
         .contextMenu { menu }
         .accessibilityElement(children: .combine)
         .accessibilityLabel(accessibilityText)
+        .accessibilityAction(named: "Show in Finder", onReveal)
+        .accessibilityAction(named: "Quick Look") { if canQuickLook { onQuickLook() } }
+        .accessibilityAction(named: "Ignore from Now On", onIgnore)
     }
+
+    /// Quick Look reads the file, which would download an online-only one.
+    private var canQuickLook: Bool { !record.isCloudOnly }
 
     @ViewBuilder
     private var leadingControl: some View {
@@ -315,6 +324,9 @@ struct CloudStorageFileRow: View {
     private var hoverActions: some View {
         HStack(spacing: 2) {
             PrismIconButton(symbol: "magnifyingglass", help: "Show in Finder", action: onReveal)
+            if canQuickLook {
+                PrismIconButton(symbol: "eye", help: "Quick Look", action: onQuickLook)
+            }
             if record.isCloudOnly {
                 if !isDownloading {
                     PrismIconButton(symbol: "arrow.down.circle", help: "Download to this Mac", action: onDownload)
@@ -338,6 +350,9 @@ struct CloudStorageFileRow: View {
 
     @ViewBuilder
     private var menu: some View {
+        if canQuickLook {
+            Button("Quick Look", action: onQuickLook)
+        }
         Button("Show in Finder", action: onReveal)
         if record.isCloudOnly {
             Button("Download to This Mac", action: onDownload)
@@ -353,6 +368,8 @@ struct CloudStorageFileRow: View {
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(record.path, forType: .string)
         }
+        Divider()
+        Button("Ignore from Now On", action: onIgnore)
     }
 
     private var detailLine: String {

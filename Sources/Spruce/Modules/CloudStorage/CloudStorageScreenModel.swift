@@ -91,12 +91,17 @@ final class CloudStorageScreenModel {
     private(set) var outcome: RunOutcome?
     private(set) var downloadingPaths: Set<String> = []
     var toast: String?
+    /// The file shown in Quick Look (only ever one whose contents are all on this Mac).
+    var previewURL: URL?
+    /// The file waiting for the one-time "Ignore from Now On" explainer.
+    private(set) var ignoreCandidate: CloudStorageFileRecord?
 
     @ObservationIgnored private var task: Task<Void, Never>?
     @ObservationIgnored private var pollTask: Task<Void, Never>?
     @ObservationIgnored private var toastTask: Task<Void, Never>?
     @ObservationIgnored private var scanAfterDetecting = false
     private static let excludedKey = "cloudStorage.excludedProviders"
+    private static let ignoreExplainedKey = "cloudStorage.ignoreExplained"
 
     private init(engine: CloudStorageEngine) {
         self.engine = engine
@@ -269,7 +274,9 @@ final class CloudStorageScreenModel {
                     Task { @MainActor [weak self] in self?.receive(tick) }
                 })
                 guard let self, !Task.isCancelled else { return }
-                self.reports = result
+                // Files ignored while the scan ran stay out of the results.
+                self.reports = settings == SettingsStore.shared.settings
+                    ? result : engine.dropIgnored(SettingsStore.shared.settings)
                 if !result.contains(where: { $0.id == self.selectedReportID }) {
                     self.selectedReportID = result.first(where: { $0.stats.localBytes > 0 })?.id ?? result.first?.id
                 }
@@ -317,10 +324,10 @@ final class CloudStorageScreenModel {
             let result = try? await engine.scan([provider], settings: settings, replacingAll: false, progress: { _ in })
             guard let self else { return }
             self.rescanning.remove(id)
-            guard let fresh = result?.first else { return }
-            if let index = self.reports.firstIndex(where: { $0.id == id }) {
-                self.reports[index] = fresh
-            }
+            guard result?.first != nil, self.reports.contains(where: { $0.id == id }) else { return }
+            // The engine now holds the fresh report; files ignored meanwhile stay out.
+            self.reports = engine.dropIgnored(SettingsStore.shared.settings)
+            guard let fresh = self.reports.first(where: { $0.id == id }) else { return }
             let paths = Set((fresh.largestLocal + fresh.largestCloudOnly).map(\.path))
             self.selection = self.selection.filter { !report.provider.contains($0) || paths.contains($0) }
             self.showToast("\(provider.name) is up to date")
@@ -513,6 +520,73 @@ final class CloudStorageScreenModel {
     private func stopPolling() {
         pollTask?.cancel()
         pollTask = nil
+    }
+
+    // MARK: Ignore from now on
+
+    /// "Ignore from Now On": the first time, explains what ignoring means and waits
+    /// for confirmation; afterwards ignores right away.
+    func requestIgnore(_ record: CloudStorageFileRecord) {
+        guard phase == .results else { return }
+        if UserDefaults.standard.bool(forKey: Self.ignoreExplainedKey) {
+            ignore(record)
+        } else {
+            ignoreCandidate = record
+        }
+    }
+
+    func confirmIgnore() {
+        guard let record = ignoreCandidate else { return }
+        ignoreCandidate = nil
+        UserDefaults.standard.set(true, forKey: Self.ignoreExplainedKey)
+        ignore(record)
+    }
+
+    func cancelIgnore() {
+        ignoreCandidate = nil
+    }
+
+    /// Adds the file to the ignore list (every module honours it) and drops it from
+    /// the results and their totals, as the next scan will. Nothing happens to the file.
+    private func ignore(_ record: CloudStorageFileRecord) {
+        guard phase == .results else { return }
+        let store = SettingsStore.shared
+        store.ignore(path: record.path)
+        let settings = store.settings
+        reports = engine.dropIgnored(settings)
+        selection = selection.filter { !settings.isIgnored(path: $0) }
+        downloadingPaths = downloadingPaths.filter { !settings.isIgnored(path: $0) }
+        showToast("“\(record.name)” is on the ignore list now")
+    }
+
+    // MARK: Quick Look
+
+    /// Previews a downloaded file. Online-only files are never previewed: Quick Look
+    /// would download them. The file is checked again first, because macOS may have
+    /// removed its local copy since the scan.
+    func quickLook(_ record: CloudStorageFileRecord, provider: CloudStorageProvider) {
+        guard !record.isCloudOnly else {
+            showToast("“\(record.name)” is only in the cloud; download it to preview it")
+            return
+        }
+        let engine = self.engine
+        Task { [weak self] in
+            let availability = await engine.previewAvailability(of: record, in: provider)
+            guard let self else { return }
+            switch availability {
+            case .local:
+                self.previewURL = record.url
+            case .cloud:
+                self.showToast("“\(record.name)” isn't fully on this Mac anymore; preview skipped")
+                // Move the row to where it belongs now.
+                let refreshed = await engine.refresh([record])
+                guard self.phase == .results else { return }
+                self.reports = refreshed.reports
+                self.selection.subtract(refreshed.updatedRecords.filter(\.isCloudOnly).map(\.path))
+            case .missing:
+                self.showToast("“\(record.name)” was moved or deleted since the scan")
+            }
+        }
     }
 
     // MARK: Finder

@@ -1,4 +1,5 @@
 import AppKit
+import QuickLook
 import SpruceCore
 import SpruceMac
 import SwiftUI
@@ -45,6 +46,23 @@ struct CloudStorageRootScreen: View {
         .sheet(isPresented: $screen.confirmShown) {
             CloudStorageConfirmSheet(screen: screen)
         }
+        .quickLookPreview($screen.previewURL)
+        .alert(ignoreTitle, isPresented: ignoreExplainerShown, presenting: screen.ignoreCandidate) { _ in
+            Button("Ignore") { screen.confirmIgnore() }
+            Button("Cancel", role: .cancel) { screen.cancelIgnore() }
+        } message: { _ in
+            Text("Spruce won't list or count it in Cloud Storage again and leaves it out of every other scan too. Nothing happens to the file on this Mac or in the cloud. To see it again, remove it in Settings › Ignore List.")
+        }
+    }
+
+    private var ignoreTitle: String {
+        screen.ignoreCandidate.map { "Ignore “\($0.name)” from now on?" } ?? "Ignore from now on?"
+    }
+
+    /// One-time explainer shown before the first "Ignore from Now On".
+    private var ignoreExplainerShown: Binding<Bool> {
+        Binding(get: { screen.ignoreCandidate != nil },
+                set: { if !$0 { screen.cancelIgnore() } })
     }
 
     private var routeKey: String {
