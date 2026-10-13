@@ -515,8 +515,10 @@ public struct CleanupScanner: Sendable {
         return CleanupExpansion(targets: targets)
     }
 
-    /// Why an item must not be removed right now (its app or tool is running), or nil.
+    /// Why an item must not be removed right now (its app or tool is running, or a
+    /// broken launch agent's program is back), or nil.
     public func blockingReason(for item: ScanItem) -> String? {
+        if let reason = launchItemBlocker(item) { return reason }
         guard let ruleID = item.metadata[CleanupMetadataKey.ruleID], let rule = rule(id: ruleID) else { return nil }
         return gateBlocker(rule: rule, owner: item.metadata[CleanupMetadataKey.owner])
     }

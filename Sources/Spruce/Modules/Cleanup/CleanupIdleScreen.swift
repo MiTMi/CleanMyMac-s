@@ -35,9 +35,13 @@ struct CleanupIdleScreen: View {
     }
 
     private var lastRunAccessory: AnyView? {
-        let entries = model.history.history.entries.filter { $0.module == .cleanup && $0.kind == .clean }
+        // A run that emptied the Trash records that part as `.other` next to its `.clean`
+        // entry, with the same date (`CleanupHistory`); the menu bar's Empty Trash
+        // records `.other` for Cleanup too.
+        let entries = model.history.history.entries.filter { $0.module == .cleanup && ($0.kind == .clean || $0.kind == .other) }
         guard let last = entries.max(by: { $0.date < $1.date }) else { return nil }
-        let freed = last.bytes > 0 ? " · \(ByteFormat.string(last.bytes)) freed" : ""
+        let bytes = entries.filter { abs($0.date.timeIntervalSince(last.date)) < 1 }.reduce(Int64(0)) { $0 + max(0, $1.bytes) }
+        let freed = bytes > 0 ? " · \(ByteFormat.string(bytes)) freed" : ""
         return AnyView(
             Label("Last cleaned \(DurationFormat.relative(last.date))\(freed)", systemImage: "clock.arrow.circlepath")
                 .font(SpruceFont.callout)

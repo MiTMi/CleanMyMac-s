@@ -14,7 +14,9 @@ import SpruceCore
 /// in SpruceCore does the file system work). Removal always goes through
 /// `FileRemover.dispose`: junk inside regenerable zones is deleted, everything else is
 /// moved to the Trash, root-owned system caches and logs are retried with one
-/// administrator prompt. Run history is recorded by `ScanFlowModel`/Checkup, not here.
+/// administrator prompt. Run history is recorded by the app (the Cleanup screen's flow,
+/// Checkup), not here; `clean(_:progress:)` reports how a run splits for it
+/// (`CleanupRunBreakdown`: emptying a Trash bin isn't counted as freed space again).
 public final class CleanupEngine: CheckupContributor, GroupScanner, @unchecked Sendable {
     public let module: ModuleID = .cleanup
 
@@ -23,6 +25,7 @@ public final class CleanupEngine: CheckupContributor, GroupScanner, @unchecked S
     private var requestedSections: Set<CleanupSection>?
     private var moduleReport: CleanupScanReport?
     private var checkupReport: CleanupScanReport?
+    private var checkupRunReport: CleanupRunReport?
     private var liveTracker: CleanupScanTracker?
 
     /// Rules scanned at the same time (I/O bound).
@@ -45,6 +48,12 @@ public final class CleanupEngine: CheckupContributor, GroupScanner, @unchecked S
     /// The last report produced by `checkupScan`.
     public var lastCheckupReport: CleanupScanReport? {
         locked { checkupReport }
+    }
+
+    /// The last `checkupRun`, with the split the activity history should record
+    /// (`CleanupHistory.entries(for:date:summaryPrefix:)`).
+    public var lastCheckupRun: CleanupRunReport? {
+        locked { checkupRunReport }
     }
 
     /// Per-section progress of the running (or last) module scan, in display order.
@@ -85,7 +94,7 @@ public final class CleanupEngine: CheckupContributor, GroupScanner, @unchecked S
     }
 
     public func perform(_ items: [ScanItem], progress: @escaping ProgressHandler) async throws -> RunOutcome {
-        try await clean(items, progress: progress)
+        try await clean(items, progress: progress).outcome
     }
 
     // MARK: CheckupContributor
@@ -120,9 +129,12 @@ public final class CleanupEngine: CheckupContributor, GroupScanner, @unchecked S
     public func checkupRun(progress: @escaping ProgressHandler) async throws -> RunOutcome {
         let items = checkupReview.selectedItems
         guard !items.isEmpty else { return RunOutcome(module: module, summary: "Nothing selected to clean") }
-        let outcome = try await clean(items, progress: progress)
-        locked { reviewStorage.removeItems(withIDs: Set(outcome.removedItemIDs)) }
-        return outcome
+        let report = try await clean(items, progress: progress)
+        locked {
+            reviewStorage.removeItems(withIDs: Set(report.outcome.removedItemIDs))
+            checkupRunReport = report
+        }
+        return report.outcome
     }
 
     // MARK: Scanning
@@ -186,12 +198,20 @@ public final class CleanupEngine: CheckupContributor, GroupScanner, @unchecked S
         var options: PathGuard.Options
         var escalate: Bool
         var movesToTrash: Bool
+        /// Deletes Trash-bin contents (recorded apart from the rest of the run).
+        var emptiesTrash = false
     }
 
     /// Removes the selected rows. Rows whose owning app is running are skipped;
     /// folder rows are expanded into their current, still-eligible children.
-    private func clean(_ items: [ScanItem], progress: @escaping ProgressHandler) async throws -> RunOutcome {
-        guard !items.isEmpty else { return RunOutcome(module: module, summary: "Nothing selected") }
+    ///
+    /// The report's outcome is what `perform` returns; its breakdown separates emptying
+    /// the Trash bins from the rest of the run for the activity history.
+    public func clean(_ items: [ScanItem], progress: @escaping ProgressHandler) async throws -> CleanupRunReport {
+        guard !items.isEmpty else {
+            return CleanupRunReport(outcome: RunOutcome(module: module, summary: "Nothing selected"),
+                                    breakdown: CleanupRunBreakdown())
+        }
         progress(ScanProgress(fraction: nil, message: "Checking what's safe to remove…"))
         let settings = await MainActor.run { SettingsStore.shared.settings }
         let context = await CleanupSystemProbe.makeContext(purpose: .module, includeMailAccounts: false)
@@ -252,7 +272,7 @@ public final class CleanupEngine: CheckupContributor, GroupScanner, @unchecked S
             Batch(items: adminItems, options: [], escalate: true, movesToTrash: false),
             // Emptying the Trash: trashed apps are whole bundles, and root-owned items
             // left by installers need the administrator.
-            Batch(items: trashBins, options: [.allowAppBundles], escalate: true, movesToTrash: false),
+            Batch(items: trashBins, options: [.allowAppBundles], escalate: true, movesToTrash: false, emptiesTrash: true),
         ]
 
         // Unload broken launch agents before their plists move to the Trash.
@@ -265,6 +285,7 @@ public final class CleanupEngine: CheckupContributor, GroupScanner, @unchecked S
         let totalBytes = max(allTargets.reduce(Int64(0)) { $0 + max($1.size, 1) }, 1)
         var processedBytes: Int64 = 0
         var freed: Int64 = 0
+        var emptiedBytes: Int64 = 0
         var trashedBytes: Int64 = 0
         var trashedCount = 0
         var removedTargets = Set<String>()
@@ -288,6 +309,7 @@ public final class CleanupEngine: CheckupContributor, GroupScanner, @unchecked S
                 trashedCount += outcome.removedItemIDs.count
             } else {
                 freed += outcome.freedBytes
+                if batch.emptiesTrash { emptiedBytes += outcome.freedBytes }
             }
         }
         let cancelled = Task.isCancelled
@@ -310,21 +332,23 @@ public final class CleanupEngine: CheckupContributor, GroupScanner, @unchecked S
             }
         }
 
-        var parts: [String] = []
-        if freed > 0 { parts.append("\(ByteFormat.string(freed)) deleted") }
-        if trashedCount > 0 {
-            parts.append("\(CountFormat.items(trashedCount)) moved to the Trash (\(ByteFormat.string(trashedBytes)))")
-        }
-        if parts.isEmpty { parts.append(removedRows.isEmpty ? "Nothing was removed" : "Already clean") }
+        let trashBinRows = Set(items.filter(isTrashBin).map(\.id))
+        let emptiedRows = removedRows.filter { trashBinRows.contains($0) }.count
+        let breakdown = CleanupRunBreakdown(
+            cleanedCount: removedRows.count - emptiedRows, deletedBytes: freed - emptiedBytes,
+            trashedCount: trashedCount, trashedBytes: trashedBytes,
+            emptiedCount: emptiedRows, emptiedBytes: emptiedBytes
+        )
         progress(ScanProgress(fraction: 1, message: "Done", bytesFound: freed))
-        return RunOutcome(
+        let outcome = RunOutcome(
             module: module,
             freedBytes: freed,
             processedCount: removedRows.count,
             removedItemIDs: removedRows,
             failures: failures,
-            summary: "Cleaned \(CountFormat.items(removedRows.count)) · " + parts.joined(separator: " · ")
+            summary: CleanupHistory.runSummary(breakdown)
         )
+        return CleanupRunReport(outcome: outcome, breakdown: breakdown)
     }
 }
 

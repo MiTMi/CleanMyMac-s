@@ -43,6 +43,9 @@ final class CleanupScreenModel {
     let engine: CleanupEngine
     let flow: ScanFlowModel
     var route: Route = .overview
+    /// The last finished run. The flow keeps only the part of a run it recorded in the
+    /// history (see `CleanupFlowScanner`); the Done screen shows the whole run.
+    private(set) var lastRun: CleanupFlowRun?
     /// Insights, unavailable categories and scanned sections of the last module scan.
     private(set) var report: CleanupScanReport?
     var quitPrompt: CleanupQuitPrompt?
@@ -63,7 +66,10 @@ final class CleanupScreenModel {
 
     fileprivate init(engine: CleanupEngine) {
         self.engine = engine
-        flow = ScanFlowModel(module: .cleanup, scanner: engine, historyKind: .clean)
+        let scanner = CleanupFlowScanner(engine: engine)
+        flow = ScanFlowModel(module: .cleanup, scanner: scanner, historyKind: .clean)
+        scanner.flow = flow
+        scanner.onRunFinished = { [weak self] run in self?.lastRun = run }
     }
 
     // MARK: Derived
@@ -88,6 +94,13 @@ final class CleanupScreenModel {
             }
         }
         return "Looking for junk…"
+    }
+
+    /// What the Done screen shows: the whole last run.
+    var doneOutcome: RunOutcome? {
+        guard let outcome = flow.outcome else { return nil }
+        if let run = lastRun, run.flowOutcome == outcome { return run.report.outcome }
+        return outcome
     }
 
     var scannedSections: Set<CleanupSection> {
@@ -468,7 +481,7 @@ struct CleanupPhaseContent: View {
             ScanningView(module: .cleanup, progress: screen.flow.progress, title: "Cleaning…",
                          onStop: { screen.flow.cancel() })
         case .done:
-            if let outcome = screen.flow.outcome {
+            if let outcome = screen.doneOutcome {
                 DoneView(module: .cleanup, outcome: outcome,
                          doneTitle: screen.flow.groups.isEmpty ? "Done" : "Review Remaining") {
                     screen.flow.showRemaining()

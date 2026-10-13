@@ -1,6 +1,11 @@
 import Foundation
 import XCTest
 @testable import SpruceCore
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#endif
 
 final class CleanupScannerTests: XCTestCase {
     private var fx: CleanupFixture!
@@ -220,6 +225,72 @@ final class CleanupScannerTests: XCTestCase {
         let item = try XCTUnwrap(items.first)
         XCTAssertEqual(item.metadata[CleanupMetadataKey.launchItem], "1")
         XCTAssertEqual(item.deletion, .trash)
+    }
+
+    private func launchAgent(_ name: String, program: String) {
+        let plist: [String: Any] = ["Label": name, "Program": program]
+        let data = try! PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
+        fx.file("Library/LaunchAgents/\(name).plist", contents: data)
+    }
+
+    func testLaunchTargetPresenceOnlyCountsConfirmedMissingPrograms() throws {
+        let tool = fx.file("bin/tool", in: fx.root)
+        XCTAssertEqual(CleanupScanner.presence(of: tool), .present)
+        XCTAssertEqual(CleanupScanner.presence(of: fx.root + "/bin/gone"), .missing)
+        XCTAssertEqual(CleanupScanner.presence(of: fx.root + "/removed/App.app/Contents/MacOS/helper"), .missing,
+                       "the nearest existing folder can be listed")
+
+        // A symlink loop: lstat fails with ELOOP, not ENOENT.
+        let loop = fx.root + "/loop"
+        try FileManager.default.createSymbolicLink(atPath: loop, withDestinationPath: loop)
+        XCTAssertEqual(CleanupScanner.presence(of: loop + "/helper"), .unknown)
+
+        // A folder that links to a volume or folder that isn't there.
+        let linked = fx.root + "/linked"
+        try FileManager.default.createSymbolicLink(atPath: linked, withDestinationPath: fx.root + "/unmounted")
+        XCTAssertEqual(CleanupScanner.presence(of: linked + "/bin/helper"), .unknown)
+
+        // A component that is a file: ENOTDIR is not "no such file".
+        XCTAssertEqual(CleanupScanner.presence(of: tool + "/helper"), .unknown)
+    }
+
+    func testLaunchTargetInAFolderWeCannotSearchIsNotReported() throws {
+        try XCTSkipIf(getuid() == 0, "root can search any folder")
+        let vendor = fx.directory("vendor/private", in: fx.root)
+        fx.file("vendor/private/helper", in: fx.root)
+        chmod(vendor, 0o000)
+        defer { chmod(vendor, 0o755) }
+        XCTAssertEqual(CleanupScanner.presence(of: vendor + "/helper"), .unknown, "EACCES is not missing")
+        launchAgent("com.vendor.restricted", program: vendor + "/helper")
+        launchAgent("com.vendor.gone", program: fx.root + "/vendor/removed/helper")
+        let (_, report) = fx.scan(fx.context(), sections: [.systemJunk])
+        XCTAssertEqual(report.items(in: CleanupCategory.brokenLoginItems.rawValue).map(\.title), ["com.vendor.gone"])
+    }
+
+    func testBrokenLaunchAgentsSkipUncheckablePrograms() throws {
+        let loop = fx.root + "/loop"
+        try FileManager.default.createSymbolicLink(atPath: loop, withDestinationPath: loop)
+        let linked = fx.root + "/linked"
+        try FileManager.default.createSymbolicLink(atPath: linked, withDestinationPath: fx.root + "/unmounted")
+        launchAgent("com.vendor.loop", program: loop + "/helper")
+        launchAgent("com.vendor.linked", program: linked + "/helper")
+        launchAgent("com.vendor.gone", program: fx.root + "/removed/helper")
+        let (_, report) = fx.scan(fx.context(), sections: [.systemJunk])
+        XCTAssertEqual(report.items(in: CleanupCategory.brokenLoginItems.rawValue).map(\.title), ["com.vendor.gone"])
+    }
+
+    func testBrokenLaunchAgentIsSkippedWhenItsProgramComesBack() throws {
+        let program = fx.root + "/opt/vendor/helper"
+        launchAgent("com.vendor.helper", program: program)
+        let (scanner, report) = fx.scan(fx.context(), sections: [.systemJunk])
+        let item = try XCTUnwrap(report.items(in: CleanupCategory.brokenLoginItems.rawValue).first)
+        XCTAssertNil(scanner.blockingReason(for: item), "still missing: can be cleaned")
+
+        fx.file("opt/vendor/helper", in: fx.root)
+        XCTAssertNotNil(scanner.blockingReason(for: item), "reinstalled since the scan")
+
+        try FileManager.default.removeItem(atPath: try XCTUnwrap(item.url?.path))
+        XCTAssertNil(scanner.blockingReason(for: item), "plist already gone: the remover counts it as done")
     }
 
     // MARK: Trash

@@ -1,4 +1,11 @@
 import Foundation
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#elseif canImport(Musl)
+import Musl
+#endif
 
 /// Category-specific detection that goes beyond "glob + age".
 extension CleanupScanner {
@@ -70,8 +77,40 @@ extension CleanupScanner {
 
     // MARK: Broken launch agents
 
-    /// The program a launchd plist starts, when it names an absolute path that no longer
-    /// exists. Unreadable plists, Apple items, relative paths and paths on (possibly
+    /// Whether something is at a path, as far as macOS lets us tell.
+    enum PathPresence: Equatable, Sendable {
+        case present
+        /// Confirmed gone: "no such file", and the nearest folder that does exist can be read.
+        case missing
+        /// macOS wouldn't say: a folder we may not search (another account's home, a
+        /// vendor folder limited to administrators, a location privacy settings protect),
+        /// a symlink loop, a folder on a volume that isn't there…
+        case unknown
+    }
+
+    /// Checks `path` with `lstat`. Only "no such file" (`ENOENT`) counts as missing, and
+    /// only when the nearest existing ancestor can be listed — any other failure, such as
+    /// a permission error, is `.unknown`.
+    static func presence(of path: String) -> PathPresence {
+        var st = stat()
+        if lstat(path, &st) == 0 { return .present }
+        guard errno == ENOENT else { return .unknown }
+        var ancestor = CleanupPaths.parent(path)
+        while true {
+            var parent = stat()
+            if lstat(ancestor, &parent) == 0 { break }
+            guard errno == ENOENT, ancestor != "/", !ancestor.isEmpty else { return .unknown }
+            ancestor = CleanupPaths.parent(ancestor)
+        }
+        // Follows a symlinked folder, so one pointing at a missing volume stays unknown.
+        guard let dir = opendir(ancestor) else { return .unknown }
+        closedir(dir)
+        return .missing
+    }
+
+    /// The program a launchd plist starts, when it names an absolute path that is
+    /// confirmed gone (`presence(of:)` is `.missing`). Unreadable plists, Apple items,
+    /// relative paths, programs macOS won't let us check and paths on (possibly
     /// unmounted) external volumes are never reported.
     func missingLaunchTarget(plistPath: String, fileName: String) -> (label: String, program: String)? {
         if fileName.hasPrefix("com.apple.") { return nil }
@@ -80,12 +119,24 @@ extension CleanupScanner {
         if label.hasPrefix("com.apple.") { return nil }
         let program = dict["Program"] as? String ?? (dict["ProgramArguments"] as? [String])?.first
         guard let program, program.hasPrefix("/"), !program.hasPrefix("/Volumes/") else { return nil }
-        if FileWalker.entry(at: program) != nil { return nil }
+        guard Self.presence(of: program) == .missing else { return nil }
         // The top-level folder must exist (e.g. /Applications, /usr, /opt); otherwise the
         // target may live on a mount point that is simply not there right now.
         guard let top = CleanupPaths.components(program).first,
               FileWalker.entry(at: "/" + top) != nil else { return nil }
         return (label, program)
+    }
+
+    /// Why a broken launch agent row must not be cleaned now: its program can be found
+    /// again (or can no longer be checked) since the scan. Nil for other rows, and for a
+    /// plist that is already gone (the remover counts that as done).
+    func launchItemBlocker(_ item: ScanItem) -> String? {
+        guard item.metadata[CleanupMetadataKey.launchItem] == "1", let path = item.url?.path,
+              FileWalker.entry(at: path) != nil else { return nil }
+        let name = (path as NSString).lastPathComponent
+        return missingLaunchTarget(plistPath: path, fileName: name) == nil
+            ? "Its program is no longer confirmed missing; skipped"
+            : nil
     }
 
     func launchAgentDraft(_ rule: CleanupRule, path: String, entry: FileEntry) -> CleanupRowDraft? {
