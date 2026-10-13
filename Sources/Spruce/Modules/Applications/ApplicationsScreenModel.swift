@@ -608,6 +608,10 @@ final class ApplicationsScreenModel {
                                       isError: true)
             return false
         }
+        guard runState == .none else {
+            toast = ApplicationsToast(message: "Wait until the current removal finishes, then try again.", isError: true)
+            return false
+        }
         if !installers.isEmpty { receiveInstallers(installers, show: apps.isEmpty) }
         if !apps.isEmpty { receiveApps(apps) }
         return true
