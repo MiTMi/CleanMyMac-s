@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Observation
 import SpruceCore
@@ -14,6 +15,12 @@ enum CheckupScanResult: Sendable {
 enum CheckupRunResult: Sendable {
     case done(ModuleID, RunOutcome)
     case failed(ModuleID, String)
+}
+
+/// The "Quit these apps first?" sheet shown before a run.
+struct CheckupQuitPrompt: Identifiable {
+    let id = UUID()
+    var apps: [CheckupBlockingApp]
 }
 
 /// The Checkup journey (idle → scanning → results → running → done).
@@ -36,7 +43,9 @@ final class CheckupSession {
     }
 
     /// Results older than this are flagged as possibly stale.
-    nonisolated static let staleAfter: TimeInterval = 15 * 60
+    nonisolated static let staleAfter: TimeInterval = CheckupScanRequest.staleAfter
+    /// How long Quit All waits for the apps to quit before running anyway.
+    nonisolated static let quitTimeout: TimeInterval = 20
 
     private(set) var phase: Phase = .idle
     private(set) var board = CheckupBoard(included: [], available: [])
@@ -60,6 +69,17 @@ final class CheckupSession {
     private(set) var displayedFraction: Double = 0
     /// The user pressed Stop during a run: the current area finishes, the rest are skipped.
     private(set) var stopRequested = false
+    /// A scan was requested (`checkup.scan`) while stale results hold the user's choices:
+    /// the results screen asks before scanning again.
+    var scanAgainPrompt = false
+    /// A review sheet is open on the results screen (a scan request then leaves it alone).
+    var isReviewing = false
+    /// Open apps that hold up selected items, asked about before Run (`requestRun()`).
+    var quitPrompt: CheckupQuitPrompt?
+    /// Apps in the quit sheet that were asked to quit and haven't yet.
+    private(set) var quittingApps: Set<Int32> = []
+    /// Quit All was pressed: waiting (up to `quitTimeout`) for the apps before running.
+    private(set) var isWaitingForApps = false
 
     @ObservationIgnored private var contributors: [ModuleID: CheckupContributor] = [:]
     @ObservationIgnored private var scanTask: Task<Void, Never>?
@@ -67,6 +87,8 @@ final class CheckupSession {
     @ObservationIgnored private var rescanTasks: [ModuleID: Task<Void, Never>] = [:]
     @ObservationIgnored private var generation = 0
     @ObservationIgnored private var activity: NSObjectProtocol?
+    @ObservationIgnored private var quitWatchTask: Task<Void, Never>?
+    @ObservationIgnored private var quitDeadlines: [Int32: Date] = [:]
     private let throttle = CheckupProgressThrottle(interval: 0.08)
 
     private init() {}
@@ -78,6 +100,18 @@ final class CheckupSession {
     var summary: CheckupSelectionSummary { CheckupSelectionSummary(tiles: board.tiles, selection: selection) }
 
     var isBusy: Bool { phase == .scanning || phase == .running || !rescanning.isEmpty }
+
+    /// What the screen holds, for `CheckupScanRequest.response(to:)`.
+    var scanRequestScreen: CheckupScanRequest.Screen {
+        switch phase {
+        case .idle: return .idle
+        case .scanning, .running: return .busy
+        case .done: return .done
+        case .results:
+            if !rescanning.isEmpty || isWaitingForApps || quitPrompt != nil || isReviewing { return .busy }
+            return .results(finishedAt: scanFinishedAt, hasCustomChoices: hasCustomChoices)
+        }
+    }
 
     /// True when Start Over would throw away choices the user made.
     var hasCustomChoices: Bool { selectionChanged || !reviewEdited.isEmpty }
@@ -330,6 +364,140 @@ final class CheckupSession {
         }
     }
 
+    // MARK: Quit apps first
+
+    /// The Run button: first asks to quit open apps that hold up selected items (Cleanup
+    /// data of a running app, an update of an open app, maintenance that needs Mail
+    /// closed), then runs.
+    func requestRun() {
+        guard phase == .results, rescanning.isEmpty, !isWaitingForApps, quitPrompt == nil else { return }
+        let plan = CheckupRunOrder.plan(for: Set(summary.modules))
+        guard !plan.isEmpty else { return }
+        let apps = CheckupQuitApps.blockingApps(plan: plan, contributors: contributors)
+        guard !apps.isEmpty else {
+            run()
+            return
+        }
+        quittingApps = []
+        quitDeadlines = [:]
+        quitPrompt = CheckupQuitPrompt(apps: apps)
+        watchBlockingApps()
+    }
+
+    /// The sheet's per-app Quit: asks the app to quit normally (it may ask to save first;
+    /// never forced). It leaves the sheet once it has quit; when none are left, Run starts.
+    func quitBlockingApp(_ app: CheckupBlockingApp) {
+        guard quitPrompt != nil else { return }
+        if let running = NSRunningApplication(processIdentifier: app.processID), !running.isTerminated {
+            running.terminate()
+            quittingApps.insert(app.processID)
+            quitDeadlines[app.processID] = Date().addingTimeInterval(Self.quitTimeout)
+        }
+        pruneQuitPrompt()
+    }
+
+    /// Quit All & Run: asks every app to quit normally, waits up to `quitTimeout`, then
+    /// runs. Items of apps that are still open are skipped by their area and reported.
+    func quitAllBlockingAppsAndRun() {
+        guard let prompt = quitPrompt, phase == .results else { return }
+        clearQuitPrompt()
+        let apps = prompt.apps.compactMap { NSRunningApplication(processIdentifier: $0.processID) }
+            .filter { !$0.isTerminated }
+        guard !apps.isEmpty else {
+            run()
+            return
+        }
+        for app in apps { app.terminate() }
+        isWaitingForApps = true
+        let pids = apps.map(\.processIdentifier)
+        let gen = generation
+        let timeout = Self.quitTimeout
+        quitWatchTask = Task { [weak self] in
+            let deadline = Date().addingTimeInterval(timeout)
+            while Date() < deadline, !Task.isCancelled {
+                let stillOpen = pids.contains { pid in
+                    NSRunningApplication(processIdentifier: pid).map { !$0.isTerminated } ?? false
+                }
+                if !stillOpen { break }
+                try? await Task.sleep(nanoseconds: 250_000_000)
+            }
+            guard !Task.isCancelled, let session = self else { return }
+            session.finishWaitingForApps(generation: gen)
+        }
+    }
+
+    /// The waiting overlay's Run Now: stops waiting for the apps and runs.
+    func runWithoutWaitingForApps() {
+        guard isWaitingForApps else { return }
+        quitWatchTask?.cancel()
+        finishWaitingForApps(generation: generation)
+    }
+
+    /// Skip These Items: deselects what the open apps hold up and runs the rest.
+    func skipBlockedItemsAndRun() {
+        guard let prompt = quitPrompt else { return }
+        clearQuitPrompt()
+        for (module, ids) in CheckupQuitPlan.itemIDs(of: prompt.apps) {
+            guard let contributor = contributors[module] else { continue }
+            applyReview(module, groups: CheckupQuitPlan.deselecting(ids, in: contributor.checkupReview))
+        }
+        run()
+    }
+
+    /// Closes the quit sheet without running.
+    func cancelQuitPrompt() {
+        clearQuitPrompt()
+    }
+
+    private func clearQuitPrompt() {
+        quitPrompt = nil
+        quitWatchTask?.cancel()
+        quitWatchTask = nil
+        quittingApps = []
+        quitDeadlines = [:]
+    }
+
+    private func finishWaitingForApps(generation gen: Int) {
+        guard isWaitingForApps else { return }
+        isWaitingForApps = false
+        quitWatchTask = nil
+        guard gen == generation, phase == .results else { return }
+        run()
+    }
+
+    /// Keeps the quit sheet current while it is open: apps that quit (from the sheet or
+    /// elsewhere) leave it.
+    private func watchBlockingApps() {
+        quitWatchTask?.cancel()
+        quitWatchTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 400_000_000)
+                guard !Task.isCancelled, let session = self, session.quitPrompt != nil else { return }
+                session.pruneQuitPrompt()
+            }
+        }
+    }
+
+    private func pruneQuitPrompt() {
+        guard var prompt = quitPrompt else { return }
+        prompt.apps.removeAll { app in
+            NSRunningApplication(processIdentifier: app.processID).map(\.isTerminated) ?? true
+        }
+        let open = Set(prompt.apps.map(\.processID))
+        let now = Date()
+        // An app that is still open after the timeout (it may have asked to save, and the
+        // user kept it) gets its Quit button back.
+        let quitting = quittingApps.filter { open.contains($0) && (quitDeadlines[$0].map { $0 > now } ?? false) }
+        if quitting != quittingApps { quittingApps = quitting }
+        quitDeadlines = quitDeadlines.filter { quitting.contains($0.key) }
+        if prompt.apps.isEmpty {
+            clearQuitPrompt()
+            run()
+        } else if prompt.apps != quitPrompt?.apps {
+            quitPrompt = prompt
+        }
+    }
+
     // MARK: Run
 
     /// Runs the selected areas one after another. The only entry point that acts.
@@ -385,12 +553,25 @@ final class CheckupSession {
         runBoard?.skipRemaining()
         endActivity()
         if let board = runBoard {
-            let date = Date()
-            for entry in CheckupHistory.runEntries(board, date: date) {
-                HistoryStore.shared.record(entry)
-            }
+            HistoryStore.shared.record(CheckupHistory.runEntries(board, date: Date(), parts: historyParts(for: board)))
         }
         phase = .done
+    }
+
+    /// Parts an area reports for the history itself. Cleanup splits emptying the Trash
+    /// (recorded as `.other`, so space moved to the Trash earlier is not counted twice)
+    /// from the rest of its run, which counts moved-to-Trash bytes as freed.
+    private func historyParts(for board: CheckupRunBoard) -> [ModuleID: [CheckupHistoryPart]] {
+        var parts: [ModuleID: [CheckupHistoryPart]] = [:]
+        if let outcome = board.step(.cleanup)?.outcome,
+           let report = (contributors[.cleanup] as? CleanupEngine)?.lastCheckupRun,
+           report.outcome == outcome {
+            parts[.cleanup] = CleanupHistory.records(for: report).map { record in
+                CheckupHistoryPart(kind: record.kind, bytes: max(0, record.outcome.freedBytes),
+                                   count: max(0, record.outcome.processedCount), summary: record.outcome.summary)
+            }
+        }
+        return parts
     }
 
     private func receiveRun(_ module: ModuleID, _ progress: ScanProgress, generation gen: Int) {
@@ -451,6 +632,9 @@ final class CheckupSession {
         scanTask = nil
         for task in rescanTasks.values { task.cancel() }
         rescanTasks = [:]
+        clearQuitPrompt()
+        isWaitingForApps = false
+        scanAgainPrompt = false
     }
 
     // MARK: Sleep prevention

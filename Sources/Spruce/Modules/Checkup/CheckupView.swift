@@ -50,12 +50,21 @@ struct CheckupView: View {
                           included: model.settings.settings.checkupModules)
     }
 
+    /// `checkup.scan` (weekly reminder, Activity's Run Checkup, Dock menu) starts a fresh
+    /// scan unless one is running or the results on screen are recent; stale results that
+    /// hold the user's choices ask first. The app stays open for weeks, so an old results
+    /// or completion screen must not stand in for the scan that was asked for.
     private func handle(tool: String?) {
         guard let tool, tool.hasPrefix("checkup") else { return }
         model.pendingTool = nil
-        if tool == Self.scanToolID, session.phase == .idle,
-           !model.settings.settings.checkupModules.isEmpty {
+        guard tool == Self.scanToolID, !model.settings.settings.checkupModules.isEmpty else { return }
+        switch CheckupScanRequest.response(to: session.scanRequestScreen) {
+        case .startScan:
             startScan()
+        case .askToScanAgain:
+            session.scanAgainPrompt = true
+        case .showCurrent:
+            break
         }
     }
 }

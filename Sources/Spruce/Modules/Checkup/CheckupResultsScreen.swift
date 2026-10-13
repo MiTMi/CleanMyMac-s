@@ -23,7 +23,7 @@ struct CheckupResultsScreen: View {
                     ScreenHeader(title: CheckupCopy.resultsTitle(tiles: tiles),
                                  subtitle: CheckupCopy.resultsLine(tiles: tiles),
                                  backTitle: "Start Over", onBack: requestStartOver, module: .checkup)
-                    CheckupStaleNotice(finishedAt: session.scanFinishedAt, onScanAgain: onScanAgain)
+                    CheckupStaleNotice(finishedAt: session.scanFinishedAt, onScanAgain: requestScanAgain)
                     grid(tiles, summary: summary)
                 }
                 .padding(.horizontal, Spacing.xl)
@@ -33,12 +33,29 @@ struct CheckupResultsScreen: View {
                 .frame(maxWidth: .infinity)
             }
             .scrollBounceBehavior(.basedOnSize)
+            .alert("Scan again?", isPresented: Bindable(session).scanAgainPrompt) {
+                Button("Scan Again", role: .destructive) { onScanAgain() }
+                Button("Keep Results", role: .cancel) {}
+            } message: {
+                Text(scanAgainMessage)
+            }
             footer(summary)
+                .sheet(item: Bindable(session).quitPrompt) { prompt in
+                    CheckupQuitAppsSheet(session: session, initial: prompt)
+                }
         }
+        .overlay {
+            if session.isWaitingForApps {
+                CheckupWaitingForAppsOverlay(onRunNow: { session.runWithoutWaitingForApps() })
+            }
+        }
+        .animation(Motion.standard, value: session.isWaitingForApps)
         .prismCanvasIntensity(PrismCanvasMath.Intensity.results)
         .sheet(item: $reviewModule) { module in
             CheckupReviewSheet(module: module, session: session)
         }
+        .onChange(of: reviewModule) { _, module in session.isReviewing = module != nil }
+        .onDisappear { session.isReviewing = false }
         .alert("Start over?", isPresented: $confirmStartOver) {
             Button("Start Over", role: .destructive) { session.startOver() }
             Button("Cancel", role: .cancel) {}
@@ -93,8 +110,9 @@ struct CheckupResultsScreen: View {
                 }
             } else {
                 ActionOrb(title: "Run", subtitle: summary.orbDetail, module: .checkup,
-                          isEnabled: !summary.isEmpty && session.rescanning.isEmpty, diameter: 84, isReady: true) {
-                    session.run()
+                          isEnabled: !summary.isEmpty && session.rescanning.isEmpty && !session.isWaitingForApps,
+                          diameter: 84, isReady: true) {
+                    session.requestRun()
                 }
             }
         }
@@ -104,6 +122,7 @@ struct CheckupResultsScreen: View {
 
     private func footerCaption(_ summary: CheckupSelectionSummary) -> String {
         if !session.rescanning.isEmpty { return "Waiting for the area being checked again…" }
+        if session.isWaitingForApps { return "Waiting for apps to quit…" }
         if summary.selectableCount == 0 { return "Nothing needs attention right now." }
         if summary.isEmpty { return "Tick at least one tile to run it." }
         let areas = CountFormat.items(summary.modules.count, singular: "area")
@@ -111,6 +130,20 @@ struct CheckupResultsScreen: View {
     }
 
     // MARK: Actions
+
+    /// Scan Again on the stale notice: asks first when it would clear the user's choices.
+    private func requestScanAgain() {
+        if session.hasCustomChoices {
+            session.scanAgainPrompt = true
+        } else {
+            onScanAgain()
+        }
+    }
+
+    private var scanAgainMessage: String {
+        let age = session.scanFinishedAt.map { "These results are \(DurationFormat.short(Date().timeIntervalSince($0))) old. " } ?? ""
+        return age + "A new scan finds what changed since, but clears the tiles and review choices you set."
+    }
 
     private func requestStartOver() {
         if session.hasCustomChoices {

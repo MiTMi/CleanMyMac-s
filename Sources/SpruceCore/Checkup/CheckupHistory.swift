@@ -25,13 +25,36 @@ public struct CheckupLastSummary: Equatable, Sendable {
     }
 }
 
+/// Part of what one area did in a Checkup run, recorded as its own history entry under
+/// the kind the Activity statistics count it as.
+public struct CheckupHistoryPart: Equatable, Sendable {
+    public var kind: ActivityEntry.Kind
+    public var bytes: Int64
+    public var count: Int
+    public var summary: String
+
+    public init(kind: ActivityEntry.Kind, bytes: Int64 = 0, count: Int = 0, summary: String) {
+        self.kind = kind
+        self.bytes = bytes
+        self.count = count
+        self.summary = summary
+    }
+
+    /// True when the part freed or handled something (worth an entry under its kind).
+    public var didAnything: Bool { bytes > 0 || count > 0 }
+}
+
 /// How Checkup records itself in `ActivityHistory`.
 ///
 /// * A scan adds one `.scan` entry for `.checkup` (bytes found, action count).
-/// * A run adds one entry per module that did something, attributed to that module
-///   with the module's natural kind (so per-module statistics stay correct), plus a
-///   `.checkup` marker entry (`.other` in older histories) for `.checkup` with **zero bytes** (so totals are never
-///   counted twice). All entries of one run share the same date.
+/// * A run adds, per module that did something, one entry per part of what it did,
+///   attributed to that module with the kind the module itself records (so per-module
+///   statistics stay correct): Applications updates are `.update` and its files of
+///   removed apps `.clean`; Cleanup's Trash emptying is `.other` when the run passes
+///   Cleanup's own split. An area that only failed is noted as `.other` (never counted as
+///   an action). Plus a `.checkup` marker entry (`.other` in older histories) for
+///   `.checkup` with **zero bytes** (so totals are never counted twice). All entries of
+///   one run share the same date.
 public enum CheckupHistory {
     /// Entries of one run are matched to their marker within this window (dates are
     /// stored as whole-second ISO-8601 strings).
@@ -56,17 +79,65 @@ public enum CheckupHistory {
                              summary: "Checkup: " + CheckupCopy.resultsLine(tiles: tiles))
     }
 
-    public static func runEntries(_ board: CheckupRunBoard, date: Date = Date()) -> [ActivityEntry] {
+    /// Prefix of the ids of Applications update items (`"applications.update:" + update id`;
+    /// the Applications engine finds the update to install by the same id). Every other
+    /// Applications item in a Checkup review is a file of a removed app (id = its path).
+    public static let applicationsUpdateIDPrefix = "applications.update:"
+
+    /// The history entries of a run: the parts of every completed area, then the marker.
+    ///
+    /// `parts` replaces the default split for an area that reports its own (e.g. Cleanup's
+    /// `CleanupHistory.records`, which records Trash emptying as `.other`). Parts that did
+    /// nothing are dropped; an area that did nothing but failed gets one `.other` entry.
+    public static func runEntries(_ board: CheckupRunBoard, date: Date = Date(),
+                                  parts custom: [ModuleID: [CheckupHistoryPart]] = [:]) -> [ActivityEntry] {
         var entries: [ActivityEntry] = []
-        for outcome in board.outcomes where outcome.freedBytes > 0 || outcome.processedCount > 0 || !outcome.failures.isEmpty {
-            let summary = outcome.summary.isEmpty ? CheckupCopy.outcomeDetail(outcome) : outcome.summary
-            entries.append(ActivityEntry(date: date, module: outcome.module, kind: activityKind(for: outcome.module),
-                                         bytes: max(0, outcome.freedBytes), count: max(0, outcome.processedCount),
-                                         summary: "Checkup · \(summary)"))
+        for outcome in board.outcomes {
+            let parts = (custom[outcome.module] ?? defaultParts(for: outcome)).filter(\.didAnything)
+            for part in parts {
+                entries.append(ActivityEntry(date: date, module: outcome.module, kind: part.kind,
+                                             bytes: max(0, part.bytes), count: max(0, part.count),
+                                             summary: "Checkup · \(part.summary)"))
+            }
+            if parts.isEmpty && !outcome.failures.isEmpty {
+                // Nothing was done: keep the note, but never count it as an action or a cleanup.
+                entries.append(ActivityEntry(date: date, module: outcome.module, kind: .other, bytes: 0, count: 0,
+                                             summary: "Checkup · " + CheckupCopy.failureOnlySummary(outcome)))
+            }
         }
         entries.append(ActivityEntry(date: date, module: .checkup, kind: .checkup, bytes: 0,
                                      count: board.processedCount, summary: "Checkup run · " + CheckupCopy.runSummary(board)))
         return entries
+    }
+
+    /// How an area's outcome is recorded when it reports no parts of its own: one part
+    /// under `activityKind(for:)`, except Applications (see `applicationsParts`).
+    public static func defaultParts(for outcome: RunOutcome) -> [CheckupHistoryPart] {
+        if outcome.module == .applications { return applicationsParts(outcome) }
+        let summary = outcome.summary.isEmpty ? CheckupCopy.outcomeDetail(outcome) : outcome.summary
+        return [CheckupHistoryPart(kind: activityKind(for: outcome.module), bytes: max(0, outcome.freedBytes),
+                                   count: max(0, outcome.processedCount), summary: summary)]
+    }
+
+    /// An Applications run installs updates and can also move files of removed apps to the
+    /// Trash. Updates are recorded as `.update` (count = apps updated, no bytes) and the
+    /// files as `.clean` (their bytes and file count) — the way the Applications module
+    /// records its Updater and Leftovers runs.
+    public static func applicationsParts(_ outcome: RunOutcome) -> [CheckupHistoryPart] {
+        let updated = Set(outcome.removedItemIDs.filter { $0.hasPrefix(applicationsUpdateIDPrefix) }).count
+        let files = max(0, outcome.processedCount - updated)
+        let bytes = max(0, outcome.freedBytes)
+        var parts: [CheckupHistoryPart] = []
+        if updated > 0 {
+            parts.append(CheckupHistoryPart(kind: .update, count: updated,
+                                            summary: "Updated \(CountFormat.items(updated, singular: "app"))"))
+        }
+        if files > 0 || bytes > 0 {
+            var summary = "Removed \(CountFormat.items(files, singular: "file")) of removed apps"
+            if bytes > 0 { summary += " · \(ByteFormat.string(bytes))" }
+            parts.append(CheckupHistoryPart(kind: .clean, bytes: bytes, count: files, summary: summary))
+        }
+        return parts
     }
 
     /// Summary of the most recent Checkup scan and run, or nil when there was none.
@@ -139,6 +210,16 @@ public enum CheckupCopy {
             parts.append("\(CountFormat.grouped(outcome.failures.count)) couldn't be completed")
         }
         return parts.isEmpty ? "Nothing needed doing" : parts.joined(separator: " · ")
+    }
+
+    /// History summary for an area that did nothing but fail.
+    public static func failureOnlySummary(_ outcome: RunOutcome) -> String {
+        let failures = outcome.failures
+        guard let first = failures.first else { return "Nothing needed doing" }
+        if failures.count == 1 {
+            return "Couldn't complete \(first.title) — \(first.reason)"
+        }
+        return "\(CountFormat.items(failures.count)) couldn't be completed — \(first.reason)"
     }
 
     /// Detail line for a run step on the completion screen.
