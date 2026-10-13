@@ -74,11 +74,12 @@ final class CleanupFixture {
         purpose: CleanupScanPurpose = .module,
         volumes: [CleanupVolume] = [],
         tempDir: String? = nil,
+        cacheDir: String? = nil,
         mailAccounts: [String: CleanupMailAccount] = [:]
     ) -> CleanupContext {
         CleanupContext(
             home: home, systemRoot: system, uid: CleanupContext.currentUID, userTempDir: tempDir,
-            userCacheDir: nil, startupVolumeName: "Test HD", externalVolumes: volumes,
+            userCacheDir: cacheDir, startupVolumeName: "Test HD", externalVolumes: volumes,
             runningBundleIDs: running, quittableBundleIDs: quittable, runningProcessNames: processes, hasFullDiskAccess: fullDiskAccess,
             ownBundleID: "com.spruce.test", mailAccounts: mailAccounts, now: Date(), purpose: purpose,
             documentRevisionsPaths: ["/.DocumentRevisions-V100"], deletedUsersPath: "/Users/Deleted Users"

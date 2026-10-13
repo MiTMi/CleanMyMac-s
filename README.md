@@ -11,7 +11,7 @@ affiliated with MacPaw.
 | Module | What you get |
 |---|---|
 | **Checkup** | One scan across Cleanup, Protection, Performance, Applications and Clutter; a tile per area, review sheets, one Run button. |
-| **Cleanup** | User/system caches and logs, temp files, Xcode and developer junk (Device Support and simulator runtimes listed for review), iOS backups and updates, broken preferences and login items, Mail attachment copies, Trash bins. |
+| **Cleanup** | User/system caches (including the per-user cache folder in `/private/var/folders`) and logs, temp files, Xcode and developer junk (Device Support and simulator runtimes listed for review), iOS backups and updates, broken preferences and login items, Mail attachment copies, Trash bins. |
 | **Protection** | Malware & persistence scan (quick/balanced/deep) with signature and hash checks, Apple's XProtect rules (run offline by a built-in YARA engine), a daily-updated threat list from this repository and optional VirusTotal hash lookups with your own API key; real-time watch of launch agents/daemons, browser & macOS privacy traces, app permissions review/reset. |
 | **Performance** | Maintenance tasks (free RAM, purgeable space, DNS, Spotlight, Mail, fonts…) behind one admin prompt, login & background items with reversible on/off, heavy consumers. |
 | **Applications** | Full uninstaller with Reset, leftovers of removed apps, old installers, updater (Sparkle, App Store, Homebrew), extensions manager. |

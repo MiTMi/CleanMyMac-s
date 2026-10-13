@@ -208,6 +208,7 @@ public struct CleanupScanner: Sendable {
                 guard seen.insert(candidate.lowercased()).inserted else { continue }
                 onProgress?(candidate)
                 guard let entry = FileWalker.entry(at: candidate), !entry.isSymlink else { continue }
+                if CleanupPaths.matchesAny(entry.name, rule.skippedNames) { continue }
                 if isBlocked(candidate) { continue }
                 let relation = territoryRelation(candidate, before: index)
                 if relation == .inside { continue }
@@ -562,7 +563,9 @@ public struct CleanupScanner: Sendable {
         if let inode = item.metadata[CleanupMetadataKey.inode], inode != String(entry.inode) {
             return CleanupExpansion(failure: "Changed since the scan; skipped")
         }
-        if isBlocked(path) { return CleanupExpansion(failure: "Protected location") }
+        if isBlocked(path) || CleanupPaths.matchesAny(entry.name, rule.skippedNames) {
+            return CleanupExpansion(failure: "Protected location")
+        }
         // Counted while its app was open; the app has quit since, so content older than
         // `quitFirstFloor` is no longer in use.
         let quitFirst = rule.whileRunning == .quitFirst && item.metadata[CleanupMetadataKey.quitToClean] == "1"

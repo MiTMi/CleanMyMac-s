@@ -299,6 +299,9 @@ public struct CleanupRule: Sendable, Hashable, Identifiable {
     public var namePatterns: [String]
     /// Child-name globs that are never counted.
     public var excludedNames: [String]
+    /// Name globs the rule's own paths never match: a matching folder is skipped as if it
+    /// weren't there (e.g. Apple's folders among the apps' in the user cache folder).
+    public var skippedNames: [String]
     /// Row-name globs shown unchecked (review) instead of pre-selected.
     public var reviewNames: [String]
     /// The rule's folders are regenerable zones where permanent removal is acceptable
@@ -333,6 +336,7 @@ public struct CleanupRule: Sendable, Hashable, Identifiable {
         whileRunning: RunningPolicy = .skip,
         namePatterns: [String] = [],
         excludedNames: [String] = [],
+        skippedNames: [String] = [],
         reviewNames: [String] = [],
         addsPermanentZone: Bool = false,
         includeHidden: Bool = false,
@@ -358,6 +362,7 @@ public struct CleanupRule: Sendable, Hashable, Identifiable {
         self.whileRunning = whileRunning
         self.namePatterns = namePatterns
         self.excludedNames = excludedNames
+        self.skippedNames = skippedNames
         self.reviewNames = reviewNames
         self.addsPermanentZone = addsPermanentZone
         self.includeHidden = includeHidden

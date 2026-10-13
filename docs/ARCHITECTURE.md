@@ -285,15 +285,22 @@ follows the safety rules below.
 6. **Honour the ignore list** (`SpruceSettings.filteringIgnored`, `isIgnored`).
 7. **Never remove data of a running app** where deleting would corrupt state (browser
    privacy cleanup requires the browser to be quit; offer to quit it). Cleanup rules say
-   how an open app's rows behave (`CleanupRule.RunningPolicy`): `~/Library/Caches` and
-   container caches are selected like CleanMyMac 5's and Clean / Run asks to quit the app
-   first (`quitToClean`). That applies only when every open app holding the row can be
+   how an open app's rows behave (`CleanupRule.RunningPolicy`): `~/Library/Caches`,
+   container caches, and the user cache folder's GPU shader caches, app folders and
+   Safari Safe Browsing data are selected like CleanMyMac 5's and Clean / Run asks to
+   quit the app first (`quitToClean`). That applies only when every open app holding the row can be
    quit from the sheet (`CleanupContext.quittableBundleIDs`, not background-only). Such a
    row's age limit shrinks to `CleanupScanner.quitFirstFloor` (5 minutes) while the app
    is open and when it is expanded after the app quit; the engine skips it while the app
    is open and re-checks running apps right before removing. Group-container caches stay
    `skip` (extensions sharing them are invisible to the check). Week-old logs (`allow`)
    don't need the app closed. Everything else is listed unchecked while its app is open.
+   In the user cache folder (`$DARWIN_CACHE`), Apple's own folders are left alone
+   (apart from GPU shader subfolders) except the ones a rule names (Safari Safe Browsing,
+   media analysis for review, the Simulator's and macOS's shader caches, Developer Tools,
+   the compiler module cache); `caches.darwinApps` covers
+   the other apps' folders and skips `com.apple.*` (`CleanupRule.skippedNames`). The icon
+   store in `/Library/Caches`, the Dock icon cache and the font registry stay protected.
 8. **No telemetry, no network calls** except: update checks (Sparkle appcasts, iTunes
    lookup API, Homebrew API) when the user opens Updater; while Settings › Notifications ›
    App updates is on, also when Checkup scans Applications and in a daily background check
