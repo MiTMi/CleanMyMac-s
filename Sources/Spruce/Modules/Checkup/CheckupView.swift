@@ -50,6 +50,7 @@ struct CheckupView: View {
     /// prompt is open.
     private var menuActions: SpruceFlowActions {
         var actions = SpruceFlowActions()
+        actions.context = "checkup"
         let modules = model.settings.settings.checkupModules
         switch session.phase {
         case .idle, .done:

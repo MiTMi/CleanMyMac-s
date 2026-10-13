@@ -161,6 +161,7 @@ struct ProtectionToolScreen: View {
     /// a safe selection without a confirmation and the menu may only open one.
     private var menuActions: SpruceFlowActions {
         var actions = SpruceFlowActions()
+        actions.context = "protection.\(tool.rawValue).\(ObjectIdentifier(flow).hashValue)"
         switch flow.phase {
         case .idle, .done, .failed:
             actions.scanAgain = { screen.startScan(tool) }

@@ -7,19 +7,32 @@ import SpruceCore
 public final class SettingsStore {
     public static let shared = SettingsStore()
 
+    /// The current settings. Assigning an equal value does nothing: no save and no change
+    /// notice. (An observed property notifies on every assignment, so a Binding that
+    /// writes back the value it read, such as the menu bar item's, would redraw every
+    /// view that reads settings and can drive SwiftUI into an endless update loop.)
     public var settings: SpruceSettings {
-        didSet { if settings != oldValue { save() } }
+        get {
+            access(keyPath: \.settings)
+            return storage
+        }
+        set {
+            guard newValue != storage else { return }
+            withMutation(keyPath: \.settings) { storage = newValue }
+            save()
+        }
     }
 
+    @ObservationIgnored private var storage: SpruceSettings
     private let store: JSONFileStore<SpruceSettings>
 
     public init(url: URL = SprucePaths.settingsFile) {
         store = JSONFileStore(url: url)
-        settings = store.load() ?? SpruceSettings()
+        storage = store.load() ?? SpruceSettings()
     }
 
     private func save() {
-        try? store.save(settings)
+        try? store.save(storage)
     }
 
     // Ignore-list conveniences.

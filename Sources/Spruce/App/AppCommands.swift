@@ -8,7 +8,17 @@ import SwiftUI
 /// Actions the focused screen offers to the Scan and Edit menus. A screen publishes
 /// them with `.focusedSceneValue(\.spruceFlow, …)` (`ScanFlowModel.menuActions` builds
 /// them for a standard flow); a nil member disables its menu item.
-struct SpruceFlowActions {
+///
+/// Equatable on purpose: SwiftUI compares focused values to decide whether the main
+/// menu must be rebuilt, and closures never compare equal, so a closure-only value
+/// rebuilt the whole menu bar on every redraw of the screen — with a sheet opening at
+/// launch, that fed back into an endless update loop (the app hung). Two values are
+/// equal when they have the same `context` and offer the same actions; SwiftUI then
+/// keeps the earlier closures, so `context` must name everything the closures capture
+/// by value (screen, tool, section, model identity).
+struct SpruceFlowActions: Equatable {
+    /// What the actions act on, e.g. "checkup" or a flow model's identity.
+    var context: String = ""
     var scanAgain: (() -> Void)?
     var stop: (() -> Void)?
     /// Opens the screen's own confirmation — never removes anything directly.
@@ -26,19 +36,39 @@ struct SpruceFlowActions {
         self.deselectAll = deselectAll
         self.selectRecommended = selectRecommended
     }
+
+    static func == (lhs: SpruceFlowActions, rhs: SpruceFlowActions) -> Bool {
+        lhs.context == rhs.context && lhs.offered == rhs.offered
+    }
+
+    /// Which menu items are enabled.
+    private var offered: [Bool] {
+        [scanAgain != nil, stop != nil, reviewAndRun != nil, selectAll != nil, deselectAll != nil,
+         selectRecommended != nil]
+    }
 }
 
 /// The focused review row(s), for File › Quick Look / Reveal in Finder / Copy Path / Ignore.
 /// Published by review lists with `.focusedSceneValue(\.spruceRows, …)`.
-struct SpruceRowActions {
+///
+/// Equatable for the same reason as `SpruceFlowActions`: equal when it is the same row
+/// (`itemID`, `urls`) offering the same actions.
+struct SpruceRowActions: Equatable {
+    var itemID: String?
     var urls: [URL]
     var quickLook: (() -> Void)?
     var ignore: (() -> Void)?
 
-    init(urls: [URL], quickLook: (() -> Void)? = nil, ignore: (() -> Void)? = nil) {
+    init(itemID: String? = nil, urls: [URL], quickLook: (() -> Void)? = nil, ignore: (() -> Void)? = nil) {
+        self.itemID = itemID
         self.urls = urls
         self.quickLook = quickLook
         self.ignore = ignore
+    }
+
+    static func == (lhs: SpruceRowActions, rhs: SpruceRowActions) -> Bool {
+        lhs.itemID == rhs.itemID && lhs.urls == rhs.urls
+            && (lhs.quickLook != nil) == (rhs.quickLook != nil) && (lhs.ignore != nil) == (rhs.ignore != nil)
     }
 }
 
@@ -68,13 +98,15 @@ extension ScanFlowModel {
     var menuActions: SpruceFlowActions {
         let canScan = !isBusy
         let hasResults = phase == .results && !groups.isEmpty
-        return SpruceFlowActions(
+        var actions = SpruceFlowActions(
             scanAgain: canScan ? { [weak self] in self?.startScan() } : nil,
             stop: isBusy ? { [weak self] in self?.cancel() } : nil,
             selectAll: hasResults ? { [weak self] in self?.selectAll(true) } : nil,
             deselectAll: hasResults ? { [weak self] in self?.selectAll(false) } : nil,
             selectRecommended: hasResults ? { [weak self] in self?.selectRecommended() } : nil
         )
+        actions.context = "flow.\(ObjectIdentifier(self).hashValue)"
+        return actions
     }
 }
 

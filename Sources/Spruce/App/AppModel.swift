@@ -60,7 +60,9 @@ final class AppModel {
     }
 
     func refreshPermissions() {
-        hasFullDiskAccess = Permissions.hasFullDiskAccess
+        // Assign only on a change: every assignment redraws the views that read it.
+        let granted = Permissions.hasFullDiskAccess
+        if granted != hasFullDiskAccess { hasFullDiskAccess = granted }
     }
 
     /// Navigate to a module, optionally opening one of its tools.

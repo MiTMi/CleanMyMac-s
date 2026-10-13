@@ -638,7 +638,7 @@ private struct PrismReviewRowsPublisher: ViewModifier {
         if let onIgnore {
             ignore = { onIgnore(item) }
         }
-        return SpruceRowActions(urls: item.url.map { [$0] } ?? [], quickLook: quickLook, ignore: ignore)
+        return SpruceRowActions(itemID: item.id, urls: item.url.map { [$0] } ?? [], quickLook: quickLook, ignore: ignore)
     }
 }
 

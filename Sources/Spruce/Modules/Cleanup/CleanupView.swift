@@ -274,6 +274,7 @@ final class CleanupScreenModel {
     /// menu may only open one.
     var menuActions: SpruceFlowActions {
         var actions = SpruceFlowActions()
+        actions.context = "cleanup.\(ObjectIdentifier(self).hashValue).\(reviewedSection?.rawValue ?? "all")"
         switch flow.phase {
         case .idle, .done, .failed:
             actions.scanAgain = { [weak self] in self?.startScan() }
