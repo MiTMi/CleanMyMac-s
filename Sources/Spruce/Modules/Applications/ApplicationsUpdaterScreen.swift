@@ -84,23 +84,26 @@ struct ApplicationsUpdaterScreen: View {
 
     @ViewBuilder
     private var footer: some View {
-        let checked = screen.checkedHomebrewUpdates
+        let checked = screen.checkedInstallableUpdates
         if !checked.isEmpty {
+            let onlyHomebrew = checked.allSatisfy(\.isUnattended)
             GlassCard(padding: Spacing.m) {
                 HStack(spacing: Spacing.m) {
-                    Image(systemName: "mug")
+                    Image(systemName: onlyHomebrew ? "mug" : "arrow.down.circle")
                         .font(.system(size: 14, weight: .semibold))
                         .foregroundStyle(ModuleID.applications.palette.accentText)
-                    Text("\(CountFormat.items(checked.count, singular: "Homebrew update")) selected")
+                    Text("\(CountFormat.items(checked.count, singular: onlyHomebrew ? "Homebrew update" : "update")) selected")
                         .font(SpruceFont.bodyStrong)
                         .foregroundStyle(Ink.primary)
-                    Text("Installed one after another with brew upgrade.")
+                    Text(onlyHomebrew
+                         ? "Installed one after another with brew upgrade."
+                         : "Installed one after another. Old versions go to the Trash.")
                         .font(SpruceFont.caption)
                         .foregroundStyle(Ink.tertiary)
                     Spacer()
                     CapsuleButton(title: "Deselect") { screen.selectedUpdateIDs = [] }
                     CapsuleButton(title: "Update \(checked.count)", symbol: "arrow.down.circle", prominent: true) {
-                        screen.installHomebrew(checked)
+                        screen.installUpdates(checked)
                     }
                     .disabled(screen.isInstallingUpdates)
                 }
@@ -177,12 +180,13 @@ struct ApplicationsUpdateSectionHeader: View {
 
     var body: some View {
         let ink = PrismInk(contrast)
+        let installableInSection = updates.filter { screen.isInstallable($0) }
         HStack(spacing: Spacing.s) {
-            if source == .homebrew {
-                let installable = updates.filter { screen.status(of: $0) != .updated }
+            if !installableInSection.isEmpty {
+                let installable = installableInSection.filter { screen.status(of: $0) != .updated }
                 let checked = installable.filter { screen.selectedUpdateIDs.contains($0.id) }.count
                 SpruceCheckbox(state: checked == 0 ? SelectionState.none : (checked == installable.count ? .all : .some),
-                               module: .applications, label: "Select all Homebrew updates") {
+                               module: .applications, label: "Select all \(source.title) updates Spruce can install") {
                     let ids = installable.map(\.id)
                     if checked == installable.count {
                         screen.selectedUpdateIDs.subtract(ids)
@@ -224,7 +228,7 @@ struct ApplicationsUpdateRow: View {
         let ink = PrismInk(contrast)
         let isCurrent = screen.selectedUpdateID == update.id
         HStack(spacing: Spacing.s) {
-            if update.isUnattended {
+            if screen.isInstallable(update) {
                 SpruceCheckbox(isOn: screen.selectedUpdateIDs.contains(update.id), module: .applications, label: update.name) {
                     screen.toggleUpdateCheck(update)
                 }
@@ -405,9 +409,18 @@ struct ApplicationsUpdateDetailPane: View {
         if case .some(.failed(let reason)) = screen.status(of: update) {
             ApplicationsBanner(symbol: "exclamationmark.triangle.fill", text: reason, tint: StatusColor.warning)
         }
-        if let app = screen.app(for: update), app.isRunning, update.source == .homebrew {
-            ApplicationsBanner(symbol: "circle.fill", text: "\(update.name) is open. It's asked to quit before Homebrew updates it.",
+        if let app = screen.app(for: update), app.isRunning, screen.isInstallable(update) {
+            ApplicationsBanner(symbol: "circle.fill",
+                               text: update.source == .homebrew
+                                ? "\(update.name) is open. It's asked to quit before Homebrew updates it."
+                                : "\(update.name) is open. It's asked to quit before the update and reopens afterwards.",
                                tint: StatusColor.success)
+        }
+        if screen.installMethod(update) == .sparkle {
+            ApplicationsBanner(symbol: "checkmark.seal",
+                               text: "Spruce downloads this update from the developer, checks it against their signature and the app's developer ID, then replaces the app. The old version goes to the Trash.")
+        } else if !update.isMajor, let reason = screen.handOffReason(update) {
+            ApplicationsBanner(symbol: "info.circle", text: reason)
         }
     }
 
@@ -473,6 +486,16 @@ struct ApplicationsUpdateActions: View {
                 }
             case .appStore:
                 CapsuleButton(title: "Open in App Store", symbol: "bag", prominent: true) { screen.perform(.appStore, for: update) }
+            case .sparkle where screen.installMethod(update) == .sparkle:
+                if status == .updated {
+                    PrismChip(text: "Updated", color: StatusColor.success, symbol: "checkmark")
+                } else {
+                    CapsuleButton(title: status == .updating ? "Updating…" : "Update", symbol: "arrow.down.circle", prominent: true) {
+                        screen.installUpdates([update])
+                    }
+                    .disabled(screen.isInstallingUpdates)
+                }
+                CapsuleButton(title: "Open App", symbol: "arrow.up.forward.app") { screen.perform(.openApp, for: update) }
             case .sparkle:
                 if update.isMajor && update.downloadURL != nil {
                     CapsuleButton(title: "Download Page", symbol: "safari", prominent: true) { screen.perform(.download, for: update) }

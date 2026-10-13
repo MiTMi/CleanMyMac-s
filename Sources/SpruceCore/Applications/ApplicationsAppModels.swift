@@ -58,6 +58,48 @@ public enum ApplicationsAppSource: String, Codable, Sendable, CaseIterable {
     }
 }
 
+// MARK: - Code signature
+
+/// What the app's code signature says about who made it (read without the network).
+public enum ApplicationsCodeSignature: String, Codable, Sendable, CaseIterable {
+    /// Signed with a developer certificate (Developer ID, App Store or Apple) and intact.
+    case identified
+    /// Signed without a developer identity ("ad-hoc"): nobody vouches for it.
+    case adHoc
+    /// No signature at all.
+    case unsigned
+    /// Signed, but the signature no longer matches the app (it was changed after signing).
+    case broken
+    /// Not checked.
+    case unknown
+}
+
+/// Security signals that make an app worth a closer look (the Uninstaller's Suspicious group).
+/// Based only on what the app itself shows — never on where its developer is from.
+public enum ApplicationsSuspicion {
+    /// Reasons, most serious first; empty when nothing stands out.
+    public static func reasons(_ app: ApplicationsAppInfo) -> [String] {
+        guard !app.isSystem else { return [] }
+        var reasons: [String] = []
+        switch app.codeSignature {
+        case .broken:
+            reasons.append("Its signature is broken: the app was changed after its developer signed it.")
+        case .unsigned:
+            reasons.append("It isn't signed, so nothing shows who made it.")
+        case .adHoc:
+            reasons.append("It's signed without a developer identity, so nothing shows who made it.")
+        case .identified, .unknown:
+            break
+        }
+        if app.isQuarantined && app.codeSignature != .identified && app.source != .appStore {
+            reasons.append("It was downloaded from the internet and macOS hasn't approved it yet.")
+        }
+        return reasons
+    }
+
+    public static func isSuspicious(_ app: ApplicationsAppInfo) -> Bool { !reasons(app).isEmpty }
+}
+
 // MARK: - Identity (input to the leftover matcher)
 
 /// Everything that identifies an app's files on disk.
@@ -134,6 +176,11 @@ public struct ApplicationsAppInfo: Identifiable, Hashable, Sendable, Codable {
     public var appGroups: [String]
     public var embeddedBundleIDs: [String]
     public var names: [String]
+    /// `SUPublicEDKey` from Info.plist: the developer's key for signed Sparkle updates.
+    public var sparklePublicEDKey: String?
+    public var codeSignature: ApplicationsCodeSignature
+    /// Carries the `com.apple.quarantine` mark (downloaded, not yet opened and approved).
+    public var isQuarantined: Bool
 
     public init(path: String, name: String, bundleID: String, version: String = "", build: String = "",
                 executableName: String? = nil, vendor: String = "Other", teamID: String? = nil,
@@ -141,7 +188,8 @@ public struct ApplicationsAppInfo: Identifiable, Hashable, Sendable, Codable {
                 isSystem: Bool = false, size: Int64 = 0, lastUsed: Date? = nil, dateAdded: Date? = nil,
                 isRunning: Bool = false, sparkleFeedURL: String? = nil, caskToken: String? = nil,
                 prefersVendorUninstaller: Bool = false, appGroups: [String] = [],
-                embeddedBundleIDs: [String] = [], names: [String] = []) {
+                embeddedBundleIDs: [String] = [], names: [String] = [], sparklePublicEDKey: String? = nil,
+                codeSignature: ApplicationsCodeSignature = .unknown, isQuarantined: Bool = false) {
         self.path = path
         self.name = name
         self.bundleID = bundleID
@@ -163,6 +211,9 @@ public struct ApplicationsAppInfo: Identifiable, Hashable, Sendable, Codable {
         self.appGroups = appGroups
         self.embeddedBundleIDs = embeddedBundleIDs
         self.names = names
+        self.sparklePublicEDKey = sparklePublicEDKey
+        self.codeSignature = codeSignature
+        self.isQuarantined = isQuarantined
     }
 
     public var url: URL { URL(fileURLWithPath: path) }
@@ -317,11 +368,14 @@ public enum ApplicationsAppFacet: Hashable, Sendable {
     case intelOnly
     case system
     case vendor(String)
+    /// Apps with security signals worth a look (see `ApplicationsSuspicion`).
+    case suspicious
 
     public var title: String {
         switch self {
         case .all: return "All Applications"
         case .unused: return "Unused"
+        case .suspicious: return "Suspicious"
         case .selected: return "Selected"
         case .appStore: return "App Store"
         case .homebrew: return "Homebrew"
@@ -338,6 +392,7 @@ public enum ApplicationsAppFacet: Hashable, Sendable {
         switch self {
         case .all: return "square.grid.2x2"
         case .unused: return "moon.zzz"
+        case .suspicious: return "exclamationmark.shield"
         case .selected: return "checkmark.circle"
         case .appStore: return "bag"
         case .homebrew: return "mug"
@@ -372,6 +427,7 @@ public enum ApplicationsAppFilter {
         switch facet {
         case .all: return true
         case .unused: return ApplicationsUnusedRule.isUnused(app, now: now, days: unusedDays)
+        case .suspicious: return ApplicationsSuspicion.isSuspicious(app)
         case .selected: return selected.contains(app.id)
         case .appStore: return app.source == .appStore
         case .homebrew: return app.source == .homebrew

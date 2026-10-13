@@ -14,7 +14,8 @@ struct ApplicationsFilesScreen: View {
         case .idle:
             ZStack(alignment: .topLeading) {
                 ModuleIdleView(module: .applications, title: title, subtitle: idleSubtitle, features: features,
-                               actionTitle: "Scan") {
+                               actionTitle: "Scan",
+                               accessory: tool == .leftovers ? AnyView(ApplicationsTrashOfferToggle(screen: screen)) : nil) {
                     SpruceSound.play(.scanStart)
                     review.scan()
                 }
@@ -46,6 +47,10 @@ struct ApplicationsFilesScreen: View {
             }
             if !review.groups.isEmpty {
                 ApplicationsBanner(symbol: tool == .leftovers ? "info.circle" : "shippingbox", text: bannerText)
+            }
+            if tool == .leftovers {
+                ApplicationsTrashOfferToggle(screen: screen)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
             if review.groups.allItems.isEmpty {
                 EmptyStateView(module: .applications, title: emptyTitle, message: emptyMessage,
@@ -91,9 +96,12 @@ struct ApplicationsFilesScreen: View {
     }
 
     private var bannerText: String {
-        tool == .leftovers
-            ? "These files are named after apps that are no longer installed. Spruce can't be completely sure nothing uses them, so nothing is selected — look through them first. Everything goes to the Trash."
-            : "Installers of apps you already have, downloaded more than a month ago, are selected. Others stay unticked in case you still need them."
+        if tool == .leftovers {
+            return review.hasRemovedApps
+                ? "Settings, caches and logs of apps you moved to the Trash are selected. Their data folders, and files named after other removed apps, aren't — look through them first. Everything goes to the Trash."
+                : "These files are named after apps that are no longer installed. Spruce can't be completely sure nothing uses them, so nothing is selected — look through them first. Everything goes to the Trash."
+        }
+        return "Installers of apps you already have, downloaded more than a month ago, are selected. Disk images that may hold personal files, and installers Spruce isn't sure about, stay unticked."
     }
 
     private var emptyTitle: String {
@@ -125,5 +133,32 @@ struct ApplicationsFilesScreen: View {
             IdleFeature(symbol: "trash", title: "Recoverable",
                         detail: "Removed installers go to the Trash."),
         ]
+    }
+}
+
+/// "Offer to remove leftovers when an app is dragged to the Trash" (needs Full Disk Access,
+/// because the Trash is protected).
+struct ApplicationsTrashOfferToggle: View {
+    @Bindable var screen: ApplicationsScreenModel
+    @Environment(AppModel.self) private var model
+    @Environment(\.colorSchemeContrast) private var contrast
+
+    var body: some View {
+        HStack(spacing: Spacing.s) {
+            Toggle(isOn: $screen.offerLeftoversOnTrash) {
+                Text("Offer to remove what an app leaves behind when you drag it to the Trash")
+                    .font(SpruceFont.callout)
+                    .foregroundStyle(PrismInk(contrast).secondary)
+            }
+            .toggleStyle(.switch)
+            .controlSize(.small)
+            .tint(ModuleID.applications.palette.accent)
+            if screen.offerLeftoversOnTrash && !model.hasFullDiskAccess {
+                PrismTextButton(title: "Needs Full Disk Access", symbol: "lock", module: .applications) {
+                    Permissions.openFullDiskAccessSettings()
+                }
+            }
+        }
+        .onAppear { model.refreshPermissions() }
     }
 }

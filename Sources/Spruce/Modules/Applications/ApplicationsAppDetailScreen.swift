@@ -203,6 +203,12 @@ struct ApplicationsModeBar: View {
                 ApplicationsBanner(symbol: "circle.fill", text: "\(app.name) is open. Spruce asks it to quit first, so it can save your work.",
                                    tint: StatusColor.success)
             }
+            let reasons = ApplicationsSuspicion.reasons(app)
+            if !reasons.isEmpty {
+                ApplicationsBanner(symbol: "exclamationmark.shield",
+                                   text: reasons.joined(separator: " ") + " Scan it for malware if you didn't expect this.",
+                                   tint: StatusColor.warning)
+            }
             if app.prefersVendorUninstaller {
                 ApplicationsBanner(symbol: "exclamationmark.shield",
                                    text: "\(app.vendor) ships its own uninstaller for this app. Security and management tools install system components that only their uninstaller removes cleanly.",

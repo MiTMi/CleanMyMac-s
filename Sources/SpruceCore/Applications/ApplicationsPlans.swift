@@ -53,6 +53,10 @@ public enum ApplicationsMeta {
     public static let systemDomain = "applications.systemDomain"
     public static let caskToken = "applications.caskToken"
     public static let ownerKey = "applications.ownerKey"
+    /// Bundle id of the app (moved to the Trash) a leftover file belongs to.
+    public static let removedApp = "applications.removedApp"
+    /// `ApplicationsUpdateInstallMethod` raw value of an update item.
+    public static let updateMethod = "applications.updateMethod"
     /// Read by `SpruceSettings.filteringIgnored`.
     public static let bundleID = "bundleID"
     /// Re-checked by `FileRemover` (the item must still be the same file).
@@ -184,17 +188,23 @@ public enum ApplicationsOrphanPlan {
 public enum ApplicationsInstallerPlan {
     public static let rootGroupID = "applications.installers"
 
-    /// One group per installer kind. Only installers of installed apps older than 30 days
-    /// (and not mounted) are pre-selected.
-    public static func groups(_ files: [ApplicationsInstallerFile], now: Date = Date()) -> [ScanGroup] {
+    /// One group per installer kind. Only installers confidently matched to an installed
+    /// app, older than 30 days, not mounted or encrypted, and without a personal-sounding
+    /// name are pre-selected. `preselect: false` (files handed over from Finder) leaves
+    /// everything unticked.
+    public static func groups(_ files: [ApplicationsInstallerFile], now: Date = Date(), preselect: Bool = true) -> [ScanGroup] {
         var groups: [ScanGroup] = []
         for kind in ApplicationsInstallerKind.allCases {
             let items: [ScanItem] = files.filter { $0.kind == kind }.map { file in
                 var meta: [String: String] = [ApplicationsMeta.kind: "installer." + kind.rawValue]
                 if let inode = file.inode { meta[ApplicationsMeta.inode] = String(inode) }
-                return ScanItem.file(URL(fileURLWithPath: file.path), size: file.size, safety: file.isSafe(now: now) ? .safe : .review,
-                                     subtitle: file.installedApp.map { "For \($0) · " + ((file.path as NSString).deletingLastPathComponent).abbreviatingHome },
-                                     note: file.note(now: now), modified: file.modified, metadata: meta)
+                let folder = ((file.path as NSString).deletingLastPathComponent).abbreviatingHome
+                let subtitle = file.installedApp.map { app in
+                    (file.match?.isConfident == true ? "For \(app) · " : "Maybe for \(app) · ") + folder
+                }
+                return ScanItem.file(URL(fileURLWithPath: file.path), size: file.size,
+                                     safety: preselect && file.isSafe(now: now) ? .safe : .review,
+                                     subtitle: subtitle, note: file.note(now: now), modified: file.modified, metadata: meta)
             }
             guard !items.isEmpty else { continue }
             groups.append(ScanGroup(id: rootGroupID + "." + kind.rawValue, title: kind.title,
@@ -212,41 +222,61 @@ public enum ApplicationsCheckupPlan {
     public static let updatesGroupID = "applications.checkup.updates"
     public static let leftoversGroupID = "applications.checkup.leftovers"
 
-    /// Review groups: Homebrew updates (unattended, unselected) and files of removed apps (unselected).
-    public static func review(updates: [ApplicationsUpdate], orphanGroups: [ScanGroup]) -> [ScanGroup] {
+    /// Review groups: updates Spruce can install itself (Homebrew, and Sparkle updates whose
+    /// download is signed by the developer — `apps` are needed to check that), unselected, and
+    /// files of removed apps (unselected).
+    public static func review(updates: [ApplicationsUpdate], orphanGroups: [ScanGroup],
+                              apps: [ApplicationsAppInfo] = []) -> [ScanGroup] {
         var groups: [ScanGroup] = []
-        let unattended = updates.filter(\.isUnattended)
-        if !unattended.isEmpty {
-            let items = unattended.map { update -> ScanItem in
+        let byPath = Dictionary(apps.map { ($0.path, $0) }, uniquingKeysWith: { first, _ in first })
+        let installable = updates.compactMap { update -> (ApplicationsUpdate, ApplicationsUpdateInstallMethod)? in
+            let method = ApplicationsSparkleInstallPlan.method(for: update, app: byPath[update.appPath])
+            return method == .handOff ? nil : (update, method)
+        }
+        if !installable.isEmpty {
+            let items = installable.map { entry -> ScanItem in
+                let (update, method) = entry
                 var meta: [String: String] = [ApplicationsMeta.kind: "update", ApplicationsMeta.bundleID: update.bundleID,
-                                              ApplicationsMeta.appPath: update.appPath]
+                                              ApplicationsMeta.appPath: update.appPath,
+                                              ApplicationsMeta.updateMethod: method.rawValue]
                 if let token = update.caskToken { meta[ApplicationsMeta.caskToken] = token }
+                let how = method == .homebrew
+                    ? "Installed with Homebrew (brew upgrade)."
+                    : "Downloaded from the developer, checked against their signature, then installed. The old version goes to the Trash."
                 return ScanItem(id: "applications.update:" + update.id, title: "\(update.name) \(update.availableVersion)",
                                 subtitle: "Installed: \(update.installedVersion)", url: URL(fileURLWithPath: update.appPath),
                                 size: 0, safety: .review, isSelected: false, deletion: .custom, symbol: "arrow.down.circle",
                                 note: update.isMajor
-                                    ? "A major upgrade — it may need a new licence. Installed with Homebrew."
-                                    : "Installed with Homebrew (brew upgrade). Quit the app first if it is open.",
+                                    ? "A major upgrade — it may need a new licence. \(how)"
+                                    : "\(how) Quit the app first if it is open.",
                                 metadata: meta)
             }
-            groups.append(ScanGroup(id: updatesGroupID, title: "Homebrew Updates",
-                                    detail: "Selected updates are downloaded and installed with Homebrew.",
+            let onlyHomebrew = installable.allSatisfy { $0.1 == .homebrew }
+            groups.append(ScanGroup(id: updatesGroupID, title: onlyHomebrew ? "Homebrew Updates" : "App Updates",
+                                    detail: onlyHomebrew
+                                        ? "Selected updates are downloaded and installed with Homebrew."
+                                        : "Selected updates are downloaded and installed one after another.",
                                     symbol: "arrow.down.circle", safety: .review, items: items))
         }
         if !orphanGroups.isEmpty {
+            // Checkup only suggests these: nothing is ticked until the user looks.
+            var children = orphanGroups
+            for index in children.indices { children[index].setAllSelected(false) }
             groups.append(ScanGroup(id: leftoversGroupID, title: "Files from Removed Apps",
                                     detail: "Support files of apps that are no longer installed. Review them before removing.",
-                                    symbol: "questionmark.folder", safety: .review, children: orphanGroups))
+                                    symbol: "questionmark.folder", safety: .review, children: children))
         }
         return groups
     }
 
     /// The Applications tile: update count first, else the size of leftovers. Informational —
     /// nothing is pre-selected.
-    public static func tile(updates: [ApplicationsUpdate], updatesChecked: Bool, orphanGroups: [ScanGroup]) -> CheckupTile {
+    public static func tile(updates: [ApplicationsUpdate], updatesChecked: Bool, orphanGroups: [ScanGroup],
+                            apps: [ApplicationsAppInfo] = []) -> CheckupTile {
         let leftoverBytes = orphanGroups.totalSize
         let leftoverApps = orphanGroups.count
-        let others = updates.filter { !$0.isUnattended }.count
+        let byPath = Dictionary(apps.map { ($0.path, $0) }, uniquingKeysWith: { first, _ in first })
+        let others = updates.filter { ApplicationsSparkleInstallPlan.method(for: $0, app: byPath[$0.appPath]) == .handOff }.count
         if !updates.isEmpty {
             var detail = updates.count == 1 ? "app update available" : "app updates available"
             if others > 0 && others < updates.count { detail += " (\(others) via the App Store or the app)" }

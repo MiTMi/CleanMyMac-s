@@ -32,7 +32,30 @@ public final class ApplicationsEngine: CheckupContributor, GroupScanner, @unchec
 
     private let state = ApplicationsLocked(State())
 
-    public init() {}
+    /// Offers to remove what an app left behind when it is dragged to the Trash.
+    public let trashWatcher = ApplicationsTrashWatcher()
+    /// The daily background update check behind Settings › Notifications › App updates.
+    public let updateWatch = ApplicationsUpdateWatch()
+    private let backgroundStarted = ApplicationsLocked(false)
+
+    public init() {
+        // The app creates one engine at launch; start the background watchers then (not in
+        // `swift run` builds or tests, which have no app bundle to post notifications from).
+        if Bundle.main.bundleIdentifier != nil, Bundle.main.bundlePath.hasSuffix(".app") {
+            DispatchQueue.main.async { [weak self] in self?.startBackgroundWork() }
+        }
+    }
+
+    /// Starts the Trash watcher and the daily update check (idempotent).
+    public func startBackgroundWork() {
+        let first = backgroundStarted.update { (started: inout Bool) -> Bool in
+            defer { started = true }
+            return !started
+        }
+        guard first else { return }
+        trashWatcher.start(engine: self)
+        updateWatch.start(engine: self)
+    }
 
     // MARK: - Catalog
 
@@ -123,6 +146,26 @@ public final class ApplicationsEngine: CheckupContributor, GroupScanner, @unchec
         return refreshed
     }
 
+    /// Reads any app bundle (e.g. one dropped from Downloads), with its size. Apps inside
+    /// /System (or symlinked there) are marked as part of macOS.
+    public func readApp(at path: String) async -> ApplicationsAppInfo? {
+        let standardized = (path as NSString).standardizingPath
+        let running = await MainActor.run {
+            NSWorkspace.shared.runningApplications.contains { instance in
+                instance.bundleURL.map { ($0.path as NSString).standardizingPath } == standardized
+            }
+        }
+        return await ApplicationsMac.background {
+            let resolved = (standardized as NSString).resolvingSymlinksInPath
+            let context = ApplicationsCatalogReader.Context(
+                runningPaths: running ? [standardized] : [], runningBundleIDs: [],
+                caskTokens: ApplicationsCatalogReader.caskTokensFromCaskroom(),
+                ownBundlePath: (Bundle.main.bundlePath as NSString).standardizingPath, ownBundleID: Bundle.main.bundleIdentifier)
+            return ApplicationsCatalogReader().readApp(path: standardized, isSystem: resolved.hasPrefix("/System/"),
+                                                       context: context) { path, _, _ in DiskUsage.measure(path).bytes }
+        }
+    }
+
     /// Whether each app is open right now (by bundle path).
     public func runningApps(among apps: [ApplicationsAppInfo]) async -> [ApplicationsAppInfo] {
         let paths = await MainActor.run {
@@ -168,7 +211,12 @@ public final class ApplicationsEngine: CheckupContributor, GroupScanner, @unchec
     /// Removes checklist items (uninstall or reset), quitting the apps first. Everything goes
     /// to the Trash through `FileRemover`.
     public func uninstall(_ items: [ScanItem], progress: ProgressHandler? = nil) async -> RunOutcome {
+        // Spruce removes these apps itself: no "Finish removing?" offer afterwards.
+        let appBundleIDs = items.filter { $0.metadata[ApplicationsMeta.kind] == ApplicationsComponentKind.application.rawValue }
+            .compactMap { $0.metadata[ApplicationsMeta.bundleID] }
+        ApplicationsTrashWatcher.noteSpruceRemoval(bundleIDs: appBundleIDs)
         let outcome = await ApplicationsUninstaller.remove(items, progress: progress)
+        ApplicationsTrashWatcher.endSpruceRemoval(bundleIDs: appBundleIDs)
         let removedApps = Set(items.filter {
             $0.metadata[ApplicationsMeta.kind] == ApplicationsComponentKind.application.rawValue
                 && outcome.removedItemIDs.contains($0.id)
@@ -195,10 +243,21 @@ public final class ApplicationsEngine: CheckupContributor, GroupScanner, @unchec
         let extra = await extraInstalledBundleIDs()
         let settings = await ApplicationsMac.settings()
         progress?(ScanProgress(fraction: nil, message: "Looking for files of removed apps…"))
+        let removed = await removedAppsForLeftovers(installed: apps, extraBundleIDs: extra, settings: settings)
+        let installedApps = apps.filter { !ApplicationsTrashedAppRules.isInTrash($0.path) }
         let groups: [ScanGroup] = await ApplicationsMac.background {
-            let index = ApplicationsInstalledIndex(identities: apps.map(\.identity), extraBundleIDs: extra)
+            let index = ApplicationsInstalledIndex(identities: installedApps.map(\.identity), extraBundleIDs: extra)
             let orphans = ApplicationsOrphanDetector().detect(index: index)
-            return ApplicationsOrphanPlan.groups(orphans)
+            let orphanGroups = ApplicationsOrphanPlan.groups(orphans)
+            // Apps the user moved to the Trash: their files are found by the full matcher
+            // (names, team, app groups, helpers), not only by bundle-id-shaped names.
+            let matcher = ApplicationsLeftoverMatcher()
+            let others = installedApps.map(\.identity)
+            let removedGroups = ApplicationsRemovedAppPlan.groups(removed.map { entry in
+                (app: entry.app, candidates: matcher.candidates(for: entry.app.identity, others: others), inTrash: entry.inTrash)
+            })
+            let covered = Set(removedGroups.allItems.compactMap { $0.url?.path })
+            return removedGroups + ApplicationsRemovedAppPlan.excluding(covered, from: orphanGroups)
         }
         let filtered = settings.filteringIgnored(groups)
         progress?(ScanProgress(fraction: 1, message: "Done", bytesFound: filtered.totalSize))
@@ -212,9 +271,11 @@ public final class ApplicationsEngine: CheckupContributor, GroupScanner, @unchec
         if apps.isEmpty { apps = await loadApps(measureSizes: false) }
         let attached = await attachedDiskImages()
         let settings = await ApplicationsMac.settings()
-        let names = apps.flatMap { [$0.name] + $0.names }
+        // Apps that come with macOS never have installers in Downloads: "Photos 2019.dmg" is
+        // someone's photo archive, not an installer of Photos.
+        let installed = Self.installerMatchNames(apps)
         let groups: [ScanGroup] = await ApplicationsMac.background {
-            let files = ApplicationsInstallerDetector().scan(installedAppNames: names, attachedImages: attached)
+            let files = ApplicationsInstallerDetector().scan(installedApps: installed, attachedImages: attached)
             return ApplicationsInstallerPlan.groups(files)
         }
         let filtered = settings.filteringIgnored(groups)
@@ -222,16 +283,87 @@ public final class ApplicationsEngine: CheckupContributor, GroupScanner, @unchec
         return filtered
     }
 
-    /// Removes leftover or installer files (to the Trash). Broken launch agents are unloaded first.
+    /// Review groups for installer files handed over from Finder or dropped, wherever they
+    /// are. Nothing is ticked.
+    public func installerGroups(for paths: [String]) async -> [ScanGroup] {
+        var apps = state.current.apps
+        if apps.isEmpty { apps = await loadApps(measureSizes: false) }
+        let attached = await attachedDiskImages()
+        let installed = Self.installerMatchNames(apps)
+        return await ApplicationsMac.background {
+            let files = ApplicationsInstallerDetector(roots: []).describe(paths: paths, installedApps: installed,
+                                                                          attachedImages: attached)
+            return ApplicationsInstallerPlan.groups(files, preselect: false)
+        }
+    }
+
+    /// Names installers are matched against, with the system flag (macOS's own apps are skipped).
+    static func installerMatchNames(_ apps: [ApplicationsAppInfo]) -> [ApplicationsInstallerDetector.InstalledApp] {
+        apps.flatMap { app in
+            ([app.name] + app.names).map { ApplicationsInstallerDetector.InstalledApp(name: $0, isSystem: app.isSystem) }
+        }
+    }
+
+    /// Apps whose leftovers the Leftovers tool lists by name: apps in the Trash now, and apps
+    /// moved there earlier (remembered by the Trash watcher). Apps installed elsewhere, still
+    /// running, removed by Spruce's Uninstaller, Apple's and ignored apps are left out.
+    func removedAppsForLeftovers(installed: [ApplicationsAppInfo], extraBundleIDs: [String],
+                                 settings: SpruceSettings) async -> [(app: ApplicationsRemovedApp, inTrash: Bool)] {
+        let installedIDs = Set(installed.filter { !ApplicationsTrashedAppRules.isInTrash($0.path) }.map { $0.bundleID.lowercased() }
+            + extraBundleIDs.map { $0.lowercased() })
+        let running = await MainActor.run { () -> (ids: Set<String>, paths: Set<String>) in
+            var ids = Set<String>()
+            var paths = Set<String>()
+            for app in NSWorkspace.shared.runningApplications {
+                if let id = app.bundleIdentifier { ids.insert(id.lowercased()) }
+                if let path = app.bundleURL?.path { paths.insert((path as NSString).standardizingPath) }
+            }
+            return (ids, paths)
+        }
+        // An app Spruce removed earlier and that is installed again is the user's to trash now.
+        let catalogIDs = Set(installed.filter {
+            !ApplicationsTrashedAppRules.isInTrash($0.path) && FileManager.default.fileExists(atPath: $0.path)
+        }.map { $0.bundleID.lowercased() })
+        ApplicationsTrashWatcher.forgetSpruceRemovals(installedBundleIDs: catalogIDs)
+        let trashed = await ApplicationsMac.background { ApplicationsTrashWatcher.appsInTrash() }
+        var result: [String: (app: ApplicationsRemovedApp, inTrash: Bool)] = [:]
+        func eligible(_ bundleID: String, path: String?) -> Bool {
+            let lower = bundleID.lowercased()
+            let runningNow = running.ids.contains(lower) || path.map { running.paths.contains(($0 as NSString).standardizingPath) } == true
+            return ApplicationsTrashedAppRules.skipReason(
+                bundleID: bundleID, ownBundleID: Bundle.main.bundleIdentifier, ignoredBundleIDs: settings.ignoredBundleIDs,
+                removedBySpruce: ApplicationsTrashWatcher.isSpruceRemoval(bundleID),
+                installedElsewhere: installedIDs.contains(lower), isRunning: runningNow) == nil
+        }
+        for entry in trashed where eligible(entry.app.bundleID, path: entry.app.path) {
+            let removed = ApplicationsRemovedApp(bundleID: entry.app.bundleID, name: entry.app.name, trashedPath: entry.app.path,
+                                                 removedAt: entry.addedToTrash ?? Date(), identity: entry.app.identity)
+            result[removed.id] = (removed, true)
+        }
+        ApplicationsRemovedAppStore.shared.update { $0.log.prune(installedBundleIDs: installedIDs) }
+        for app in ApplicationsRemovedAppStore.shared.contents.log.apps where result[app.id] == nil {
+            guard eligible(app.bundleID, path: nil) else { continue }
+            result[app.id] = (app, FileWalker.entry(at: app.trashedPath) != nil)
+        }
+        return Array(result.values)
+    }
+
+    /// Removes leftover or installer files (to the Trash). Launch agents and daemons are
+    /// unloaded first; files of apps moved to the Trash that live in `/Library` are moved with
+    /// one administrator prompt.
     public func removeFiles(_ items: [ScanItem], progress: ProgressHandler? = nil) async -> RunOutcome {
         let settings = await ApplicationsMac.settings()
-        let home = NSHomeDirectory()
-        for item in items {
-            guard let path = item.url?.path, path.hasPrefix(home + "/Library/LaunchAgents/"), path.hasSuffix(".plist") else { continue }
-            _ = await Shell.run("/bin/launchctl", ["bootout", "gui/\(ApplicationsMac.uid)", path], timeout: 15)
+        await ApplicationsUninstaller.unloadLaunchJobs(in: items, progress: progress)
+        let needsAdmin = items.contains {
+            $0.metadata[ApplicationsMeta.removedApp] != nil && $0.metadata[ApplicationsMeta.systemDomain] == "1"
         }
         var outcome = await FileRemover.shared.dispose(items, module: .applications, options: [.allowLaunchItems],
-                                                       settings: settings, progress: progress)
+                                                       settings: settings, escalate: needsAdmin, progress: progress)
+        let finished = Set(items.filter { outcome.removedItemIDs.contains($0.id) }.compactMap { $0.metadata[ApplicationsMeta.removedApp] })
+        if !finished.isEmpty {
+            // Leftovers that are gone no longer need an offer.
+            for bundleID in finished { ApplicationsTrashWatcher.withdraw(bundleID: bundleID) }
+        }
         outcome.summary = outcome.removedItemIDs.isEmpty
             ? "Nothing was removed"
             : "Moved \(CountFormat.items(outcome.removedItemIDs.count)) to the Trash · \(ByteFormat.string(outcome.freedBytes))"
@@ -243,7 +375,9 @@ public final class ApplicationsEngine: CheckupContributor, GroupScanner, @unchec
     func extraInstalledBundleIDs() async -> [String] {
         let running = await MainActor.run { NSWorkspace.shared.runningApplications.compactMap(\.bundleIdentifier) }
         let found = await Shell.run("/usr/bin/mdfind", ["kMDItemContentType == 'com.apple.application-bundle'"], timeout: 30)
-        let paths = found.stdout.split(separator: "\n").map(String.init).prefix(6000)
+        // Apps in the Trash are not installed: their files are exactly what Leftovers is for.
+        let paths = found.stdout.split(separator: "\n").map(String.init)
+            .filter { !ApplicationsTrashedAppRules.isInTrash($0) }.prefix(6000)
         let spotlightIDs: [String] = await ApplicationsMac.background {
             ApplicationsMac.concurrentMap(paths.count) { index -> String? in
                 let path = paths[paths.startIndex + index]
@@ -304,6 +438,38 @@ public final class ApplicationsEngine: CheckupContributor, GroupScanner, @unchec
             _ = await refreshApp(app)
         }
         return result
+    }
+
+    /// How `update` gets installed: Homebrew, in place by Spruce (verified Sparkle archive),
+    /// or handed off to the App Store / the app.
+    public func installMethod(for update: ApplicationsUpdate) -> ApplicationsUpdateInstallMethod {
+        let app = state.current.apps.first { $0.path == update.appPath }
+        return ApplicationsSparkleInstallPlan.method(for: update, app: app)
+    }
+
+    /// Why Spruce leaves a Sparkle update to the app itself (nil when Spruce can install it).
+    public func handOffReason(for update: ApplicationsUpdate) -> String? {
+        guard update.source == .sparkle else { return nil }
+        let app = state.current.apps.first { $0.path == update.appPath }
+        return ApplicationsSparkleInstallPlan.blocker(update: update, app: app)
+    }
+
+    /// Downloads, verifies and installs a Sparkle update in place (the app must be closed).
+    /// The old version goes to the Trash. Reopens the app when `relaunch` is true.
+    public func applySparkleUpdate(_ update: ApplicationsUpdate, relaunch: Bool = false,
+                                   progress: ProgressHandler? = nil) async -> (ok: Bool, message: String) {
+        guard let app = state.current.apps.first(where: { $0.path == update.appPath }) else {
+            return (false, "The app wasn't found. Reload the list and try again.")
+        }
+        let result = await ApplicationsSparkleInstaller.install(update, app: app, progress: progress)
+        ApplicationsTrashWatcher.endSpruceRemoval(bundleIDs: [app.bundleID])
+        guard result.ok else { return (false, result.message) }
+        state.update { $0.updates.removeAll { $0.id == update.id } }
+        _ = await refreshApp(app)
+        if relaunch {
+            await MainActor.run { ApplicationsSparkleInstaller.relaunch(path: app.path) }
+        }
+        return (true, result.message)
     }
 
     /// Hand-off actions for updates Spruce does not install itself.
@@ -414,11 +580,16 @@ public final class ApplicationsEngine: CheckupContributor, GroupScanner, @unchec
             }
             updates = ApplicationsUpdateIgnore.filtered(found, ignoredItemIDs: settings.ignoredItemIDs,
                                                         ignoredBundleIDs: settings.ignoredBundleIDs)
+            // Seen on the Checkup tile; announced only when Checkup ran while Spruce was in the background.
+            let isActive = await MainActor.run { NSApp?.isActive ?? true }
+            updateWatch.record(updates, announce: !isActive)
         }
-        let review = settings.filteringIgnored(ApplicationsCheckupPlan.review(updates: updates, orphanGroups: orphanGroups))
+        let review = settings.filteringIgnored(ApplicationsCheckupPlan.review(updates: updates, orphanGroups: orphanGroups,
+                                                                              apps: apps))
         checkupReview = review
         progress(ScanProgress(fraction: 1, message: "Done", bytesFound: orphanGroups.totalSize))
-        return ApplicationsCheckupPlan.tile(updates: updates, updatesChecked: checkUpdatesNow, orphanGroups: orphanGroups)
+        return ApplicationsCheckupPlan.tile(updates: updates, updatesChecked: checkUpdatesNow, orphanGroups: orphanGroups,
+                                            apps: apps)
     }
 
     public func checkupRun(progress: @escaping ProgressHandler) async throws -> RunOutcome {
@@ -436,17 +607,28 @@ public final class ApplicationsEngine: CheckupContributor, GroupScanner, @unchec
             }
             let openApps = await runningApps(among: updateApps)
             let openPaths = Set(openApps.map(\.path))
+            let knownUpdates = state.current.updates
             for (index, item) in updateItems.enumerated() {
                 try Task.checkCancellation()
                 progress(ScanProgress(fraction: Double(index) / Double(max(updateItems.count + (fileItems.isEmpty ? 0 : 1), 1)),
                                       message: "Updating \(item.title)…"))
-                guard let token = item.metadata[ApplicationsMeta.caskToken] else { continue }
                 if let path = item.metadata[ApplicationsMeta.appPath], openPaths.contains(path) {
                     failures.append(ItemFailure(itemID: item.id, title: item.title,
                                                 reason: "The app is open. Quit it, then update from Applications › Updater."))
                     continue
                 }
-                let result = await ApplicationsUpdateChecker.upgradeCask(token)
+                let result: (ok: Bool, message: String)
+                if item.metadata[ApplicationsMeta.updateMethod] == ApplicationsUpdateInstallMethod.sparkle.rawValue {
+                    guard let update = knownUpdates.first(where: { "applications.update:" + $0.id == item.id }) else {
+                        failures.append(ItemFailure(itemID: item.id, title: item.title,
+                                                    reason: "The update is no longer offered. Check again in Applications › Updater."))
+                        continue
+                    }
+                    result = await applySparkleUpdate(update)
+                } else {
+                    guard let token = item.metadata[ApplicationsMeta.caskToken] else { continue }
+                    result = await ApplicationsUpdateChecker.upgradeCask(token)
+                }
                 if result.ok {
                     removed.append(item.id)
                 } else {

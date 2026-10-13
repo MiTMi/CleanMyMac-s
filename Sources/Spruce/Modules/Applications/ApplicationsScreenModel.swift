@@ -144,13 +144,60 @@ final class ApplicationsFileReview {
     private(set) var scannedAt: Date?
 
     private var task: Task<Void, Never>?
+    /// Files handed over from Finder or dropped (installers outside Downloads/Desktop); they
+    /// stay listed, unticked, across scans until removed.
+    private var staged: [ScanGroup] = []
 
     init(kind: Kind, engine: ApplicationsEngine) {
         self.kind = kind
         self.engine = engine
     }
 
+    /// Shows handed-over files with the results (never ticked, never acted on by itself).
+    func stage(_ groups: [ScanGroup]) {
+        guard !groups.allItems.isEmpty else { return }
+        staged = Self.merge(staged, groups)
+        guard !isBusy else { return }
+        task?.cancel()
+        self.groups = Self.merge(self.groups, Self.existing(staged))
+        scannedAt = scannedAt ?? Date()
+        outcome = nil
+        phase = .results
+    }
+
+    /// Adds `extra` items to `base`, by group id, without duplicates (an item already listed
+    /// keeps its place and selection).
+    static func merge(_ base: [ScanGroup], _ extra: [ScanGroup]) -> [ScanGroup] {
+        var result = base
+        let known = Set(base.allItems.map(\.id))
+        for group in extra {
+            let fresh = group.items.filter { !known.contains($0.id) }
+            guard !fresh.isEmpty else { continue }
+            if let index = result.firstIndex(where: { $0.id == group.id }) {
+                result[index].items.append(contentsOf: fresh)
+            } else {
+                var copy = group
+                copy.items = fresh
+                result.append(copy)
+            }
+        }
+        return result
+    }
+
+    /// Staged files that still exist.
+    private static func existing(_ groups: [ScanGroup]) -> [ScanGroup] {
+        groups.compactMap { group in
+            var g = group
+            g.items = g.items.filter { item in item.url.map { FileManager.default.fileExists(atPath: $0.path) } ?? false }
+            return g.items.isEmpty ? nil : g
+        }
+    }
+
     var hasResults: Bool { scannedAt != nil }
+    /// When the results were found (nil before the first scan).
+    var resultsDate: Date? { scannedAt }
+    /// The results include apps the user moved to the Trash (some of their files are ticked).
+    var hasRemovedApps: Bool { groups.contains { $0.id.hasPrefix(ApplicationsRemovedAppPlan.groupPrefix) } }
     var totalSize: Int64 { groups.totalSize }
     var selectedItems: [ScanItem] { groups.selectedItems }
     var isBusy: Bool { phase == .scanning || phase == .running }
@@ -175,7 +222,8 @@ final class ApplicationsFileReview {
             case .installers: result = await engine.scanInstallers(progress: handler)
             }
             guard let self, !Task.isCancelled else { return }
-            self.groups = result
+            self.staged = Self.existing(self.staged)
+            self.groups = Self.merge(result, self.staged)
             self.scannedAt = Date()
             self.phase = .results
         }
@@ -185,7 +233,7 @@ final class ApplicationsFileReview {
     func seed(_ groups: [ScanGroup]) {
         guard !isBusy else { return }
         task?.cancel()
-        self.groups = groups
+        self.groups = Self.merge(groups, Self.existing(staged))
         scannedAt = Date()
         outcome = nil
         phase = .results
@@ -320,6 +368,17 @@ final class ApplicationsScreenModel {
 
     var toast: ApplicationsToast?
 
+    /// Offer to remove what an app leaves behind when it is dragged to the Trash.
+    var offerLeftoversOnTrash: Bool = ApplicationsPreferenceStore.shared.preferences.offerLeftoversOnTrash {
+        didSet {
+            guard offerLeftoversOnTrash != oldValue else { return }
+            var preferences = ApplicationsPreferenceStore.shared.preferences
+            preferences.offerLeftoversOnTrash = offerLeftoversOnTrash
+            ApplicationsPreferenceStore.shared.preferences = preferences
+            engine.trashWatcher.refresh()
+        }
+    }
+
     private var overviewTask: Task<Void, Never>?
     private var catalogTask: Task<Void, Never>?
     private var runTask: Task<Void, Never>?
@@ -360,7 +419,13 @@ final class ApplicationsScreenModel {
             ensureCatalog()
             ensureUpdates()
         case .leftovers:
-            if leftovers.phase == .idle { leftovers.scan() }
+            // An app dragged to the Trash since the last results: look again.
+            let newer = engine.trashWatcher.lastRecordAt.map { recorded in
+                recorded > (leftovers.resultsDate ?? .distantPast)
+            } ?? false
+            if leftovers.phase == .idle || ((leftovers.phase == .results || leftovers.phase == .done) && newer) {
+                leftovers.scan()
+            }
         case .installers:
             if installers.phase == .idle { installers.scan() }
         case .extensions:
@@ -453,6 +518,9 @@ final class ApplicationsScreenModel {
 
     var intelOnlyApps: [ApplicationsAppInfo] { removableApps.filter(\.isIntelOnly) }
 
+    /// Apps with security signals worth a look (unsigned, ad-hoc, broken signature).
+    var suspiciousApps: [ApplicationsAppInfo] { removableApps.filter(ApplicationsSuspicion.isSuspicious) }
+
     var totalAppsSize: Int64 { removableApps.reduce(0) { $0 + $1.size } }
 
     /// Apps for the current facet, search and sort.
@@ -523,6 +591,89 @@ final class ApplicationsScreenModel {
         selectedAppIDs.remove(app.id)
         if detail?.app.path == app.path { detail = nil }
         toast = ApplicationsToast(message: "\(app.name) won't be offered for removal or updates. Manage the ignore list in Settings.")
+    }
+
+    // MARK: Files from Finder and drops
+
+    /// Shows apps and installers handed to Spruce (Finder Services, Open With, the Dock icon,
+    /// or dropped on this module). Never removes anything: apps open in the Uninstaller,
+    /// installers are listed unticked in Installers. Returns false when nothing was usable.
+    @discardableResult
+    func receive(_ urls: [URL]) -> Bool {
+        let files = urls.filter(\.isFileURL).map(\.standardizedFileURL)
+        let apps = files.filter { $0.pathExtension.lowercased() == "app" }
+        let installers = files.filter { Self.installerExtensions.contains($0.pathExtension.lowercased()) }
+        guard !apps.isEmpty || !installers.isEmpty else {
+            toast = ApplicationsToast(message: "Drop apps to uninstall them, or installers (.dmg, .pkg, .zip) to review them.",
+                                      isError: true)
+            return false
+        }
+        if !installers.isEmpty { receiveInstallers(installers, show: apps.isEmpty) }
+        if !apps.isEmpty { receiveApps(apps) }
+        return true
+    }
+
+    static let installerExtensions: Set<String> = ["pkg", "mpkg", "dmg", "zip", "xip"]
+
+    private func receiveInstallers(_ urls: [URL], show: Bool) {
+        if show { route = .tool(.installers) }
+        let engine = self.engine
+        let paths = urls.map(\.path)
+        Task { [weak self] in
+            let groups = await engine.installerGroups(for: paths)
+            guard let self else { return }
+            if groups.allItems.isEmpty {
+                self.toast = ApplicationsToast(message: "Those files aren't app installers.", isError: true)
+                return
+            }
+            self.installers.stage(groups)
+        }
+    }
+
+    private func receiveApps(_ urls: [URL]) {
+        detail = nil
+        route = .tool(.uninstaller)
+        ensureCatalog()
+        let engine = self.engine
+        let ownPath = Bundle.main.bundleURL.standardizedFileURL.path
+        Task { [weak self] in
+            var found: [ApplicationsAppInfo] = []
+            var refused: [String] = []
+            for url in urls {
+                let path = url.path
+                if path == ownPath {
+                    refused.append("Spruce")
+                    continue
+                }
+                let known = self?.apps.first { $0.path == path }
+                let app: ApplicationsAppInfo?
+                if let known { app = known } else { app = await engine.readApp(at: path) }
+                guard let app else { continue }
+                if app.isSystem {
+                    refused.append(app.name)
+                } else {
+                    found.append(app)
+                }
+            }
+            guard let self else { return }
+            // Apps outside the Applications folders (e.g. in Downloads) join the list for now.
+            for app in found where !self.apps.contains(where: { $0.path == app.path }) { self.apps.append(app) }
+            if found.count == 1, let only = found.first {
+                self.showDetail(only)
+            } else if found.count > 1 {
+                self.selectedAppIDs.formUnion(found.map(\.id))
+                self.facet = .selected
+            }
+            if !refused.isEmpty {
+                let names = refused.joined(separator: ", ")
+                self.toast = ApplicationsToast(message: refused == ["Spruce"]
+                                                ? "Spruce can't uninstall itself. Drag it to the Trash in Finder."
+                                                : "\(names) can't be uninstalled: \(refused.count == 1 ? "it comes" : "they come") with macOS.",
+                                               isError: true)
+            } else if found.isEmpty {
+                self.toast = ApplicationsToast(message: "Spruce couldn't read that app.", isError: true)
+            }
+        }
     }
 
     // MARK: Detail

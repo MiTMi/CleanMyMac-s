@@ -28,13 +28,17 @@ public struct ApplicationsAppcastItem: Sendable, Hashable, Codable {
     public var enclosureURL: String?
     public var enclosureLength: Int64?
     public var enclosureOS: String?
+    /// `sparkle:edSignature` of the enclosure (base64 Ed25519 signature of the archive).
+    public var edSignature: String?
+    /// `sparkle:installationType` ("application", "package", "guided package"); nil = application.
+    public var installationType: String?
 
     public init(title: String? = nil, version: String? = nil, shortVersion: String? = nil, minimumSystemVersion: String? = nil,
                 maximumSystemVersion: String? = nil, minimumAutoupdateVersion: String? = nil, channel: String? = nil,
                 hardwareRequirements: [String] = [], isCritical: Bool = false, isInformational: Bool = false,
                 descriptionText: String? = nil, releaseNotesLink: String? = nil, fullReleaseNotesLink: String? = nil,
                 link: String? = nil, pubDate: Date? = nil, enclosureURL: String? = nil, enclosureLength: Int64? = nil,
-                enclosureOS: String? = nil) {
+                enclosureOS: String? = nil, edSignature: String? = nil, installationType: String? = nil) {
         self.title = title
         self.version = version
         self.shortVersion = shortVersion
@@ -53,6 +57,8 @@ public struct ApplicationsAppcastItem: Sendable, Hashable, Codable {
         self.enclosureURL = enclosureURL
         self.enclosureLength = enclosureLength
         self.enclosureOS = enclosureOS
+        self.edSignature = edSignature
+        self.installationType = installationType
     }
 
     /// The version people see: short version, else build, else the title's version.
@@ -205,6 +211,7 @@ final class ApplicationsAppcastParserDelegate: NSObject, XMLParserDelegate {
             current?.hardwareRequirements = value.split(whereSeparator: { $0 == "," || $0 == " " }).map(String.init)
         case "criticalUpdate": current?.isCritical = true
         case "informationalUpdate": current?.isInformational = true
+        case "installationType": if prefix != nil, !value.isEmpty { current?.installationType = value }
         case "releaseNotesLink": if !value.isEmpty { current?.releaseNotesLink = value }
         case "fullReleaseNotesLink": if !value.isEmpty { current?.fullReleaseNotesLink = value }
         default: break
@@ -214,12 +221,17 @@ final class ApplicationsAppcastParserDelegate: NSObject, XMLParserDelegate {
     private func applyEnclosure(_ attributes: [String: String]) {
         var byLocal: [String: String] = [:]
         for (key, value) in attributes { byLocal[Self.local(key).name] = value }
+        // Delta updates (inside <sparkle:deltas>) patch one specific old build; never the full download.
+        if byLocal["deltaFrom"] != nil { return }
         let os = byLocal["os"]
         // Prefer a macOS enclosure when an item lists several.
         if current?.enclosureURL != nil, let os, os.lowercased() != "macos" { return }
         if let url = byLocal["url"] { current?.enclosureURL = url }
         if let length = byLocal["length"], let bytes = Int64(length) { current?.enclosureLength = bytes }
         current?.enclosureOS = os
+        let signature = byLocal["edSignature"]?.trimmingCharacters(in: .whitespacesAndNewlines)
+        current?.edSignature = signature?.isEmpty == false ? signature : nil
+        if let type = byLocal["installationType"], !type.isEmpty { current?.installationType = type }
         if current?.version == nil, let version = byLocal["version"], !version.isEmpty { current?.version = version }
         if current?.shortVersion == nil, let short = byLocal["shortVersionString"], !short.isEmpty { current?.shortVersion = short }
     }

@@ -8,9 +8,14 @@ import SwiftUI
 
 extension ApplicationsScreenModel {
 
-    /// Checks once per visit; a check older than 30 minutes is repeated.
+    /// Checks once per visit; a check older than 30 minutes is repeated. A newer result from
+    /// the background check (or Checkup) is used as is.
     func ensureUpdates() {
         guard updatesPhase != .loading else { return }
+        if let engineChecked = engine.updatesCheckedAt, engineChecked > (updatesCheckedAt ?? .distantPast), !isInstallingUpdates {
+            replaceUpdates(engine.lastUpdates, checkedAt: engineChecked)
+            setUpdatesPhase(.ready)
+        }
         if let checked = updatesCheckedAt, Date().timeIntervalSince(checked) < 30 * 60 { return }
         checkUpdates()
     }
@@ -32,6 +37,11 @@ extension ApplicationsScreenModel {
             guard let self else { return }
             self.replaceUpdates(found, checkedAt: Date())
             self.setUpdatesPhase(.ready)
+            // Shown here, so the background check won't announce them again.
+            let s = self.settings
+            engine.updateWatch.record(ApplicationsUpdateIgnore.filtered(found, ignoredItemIDs: s.ignoredItemIDs,
+                                                                        ignoredBundleIDs: s.ignoredBundleIDs),
+                                      announce: false)
             if let selected = self.selectedUpdateID, !self.visibleUpdates.contains(where: { $0.id == selected }) {
                 self.selectedUpdateID = nil
             }
@@ -72,13 +82,34 @@ extension ApplicationsScreenModel {
         return allUpdates.first { $0.id == id }
     }
 
-    /// Homebrew updates ticked for a batch update.
+    /// How an update is installed (Homebrew, in place by Spruce, or handed off).
+    func installMethod(_ update: ApplicationsUpdate) -> ApplicationsUpdateInstallMethod {
+        ApplicationsSparkleInstallPlan.method(for: update, app: app(for: update))
+    }
+
+    /// Spruce can install it (Homebrew, or a Sparkle download signed by the developer).
+    func isInstallable(_ update: ApplicationsUpdate) -> Bool {
+        installMethod(update) != .handOff
+    }
+
+    /// Why a Sparkle update is left to the app itself.
+    func handOffReason(_ update: ApplicationsUpdate) -> String? {
+        guard update.source == .sparkle else { return nil }
+        return ApplicationsSparkleInstallPlan.blocker(update: update, app: app(for: update))
+    }
+
+    /// Updates ticked for a batch update (Homebrew and verified Sparkle updates).
+    var checkedInstallableUpdates: [ApplicationsUpdate] {
+        visibleUpdates.filter { selectedUpdateIDs.contains($0.id) && isInstallable($0) && updateStatus[$0.id] != .updated }
+    }
+
+    /// Kept for callers that only deal with Homebrew.
     var checkedHomebrewUpdates: [ApplicationsUpdate] {
-        visibleUpdates.filter { selectedUpdateIDs.contains($0.id) && $0.isUnattended && updateStatus[$0.id] != .updated }
+        checkedInstallableUpdates.filter(\.isUnattended)
     }
 
     func toggleUpdateCheck(_ update: ApplicationsUpdate) {
-        guard update.isUnattended else { return }
+        guard isInstallable(update) else { return }
         if selectedUpdateIDs.contains(update.id) {
             selectedUpdateIDs.remove(update.id)
         } else {
@@ -121,7 +152,13 @@ extension ApplicationsScreenModel {
 
     /// Installs Homebrew updates, asking first when an app is open.
     func installHomebrew(_ updates: [ApplicationsUpdate]) {
-        let targets = updates.filter { $0.isUnattended && updateStatus[$0.id] != .updated }
+        installUpdates(updates.filter(\.isUnattended))
+    }
+
+    /// Installs updates Spruce can install itself (Homebrew, verified Sparkle archives), one
+    /// after another, asking first when an app is open.
+    func installUpdates(_ updates: [ApplicationsUpdate]) {
+        let targets = updates.filter { isInstallable($0) && updateStatus[$0.id] != .updated }
         guard !targets.isEmpty, !isInstallingUpdates else { return }
         let engine = self.engine
         let targetApps = targets.compactMap { app(for: $0) }
@@ -129,14 +166,15 @@ extension ApplicationsScreenModel {
             let open = await engine.runningApps(among: targetApps)
             guard let self else { return }
             if open.isEmpty {
-                self.runHomebrew(targets)
+                self.runInstalls(targets, relaunch: [])
             } else {
                 self.updateQuitPrompt = ApplicationsUpdateQuitPrompt(updates: targets, openApps: open)
             }
         }
     }
 
-    /// Quits the open apps (normally, so they can save), then updates.
+    /// Quits the open apps (normally, so they can save), then updates. Apps updated in place
+    /// by Spruce are reopened afterwards.
     func quitAndInstall() {
         guard let prompt = updateQuitPrompt else { return }
         updateQuitPrompt = nil
@@ -148,7 +186,8 @@ extension ApplicationsScreenModel {
             for update in prompt.updates where blocked.contains(update.appPath) {
                 self.setStatus(.failed("Still open — quit it and try again"), for: update.id)
             }
-            self.runHomebrew(prompt.updates.filter { !blocked.contains($0.appPath) })
+            let reopen = Set(prompt.openApps.map(\.path)).subtracting(blocked)
+            self.runInstalls(prompt.updates.filter { !blocked.contains($0.appPath) }, relaunch: reopen)
         }
     }
 
@@ -157,15 +196,15 @@ extension ApplicationsScreenModel {
         guard let prompt = updateQuitPrompt else { return }
         updateQuitPrompt = nil
         let open = Set(prompt.openApps.map(\.path))
-        runHomebrew(prompt.updates.filter { !open.contains($0.appPath) })
+        runInstalls(prompt.updates.filter { !open.contains($0.appPath) }, relaunch: [])
     }
 
     func cancelQuitPrompt() {
         updateQuitPrompt = nil
     }
 
-    /// Runs `brew upgrade --cask` for each update, one at a time.
-    private func runHomebrew(_ updates: [ApplicationsUpdate]) {
+    /// Installs each update in turn: `brew upgrade --cask`, or download → verify → replace.
+    private func runInstalls(_ updates: [ApplicationsUpdate], relaunch: Set<String>) {
         guard !updates.isEmpty else { return }
         setInstalling(true)
         for update in updates { setStatus(.queued, for: update.id) }
@@ -174,9 +213,19 @@ extension ApplicationsScreenModel {
             guard let self else { return }
             var succeeded: [ApplicationsUpdate] = []
             var failures: [ItemFailure] = []
+            var trashedBytes: Int64 = 0
             for update in updates {
                 self.setStatus(.updating, for: update.id)
-                let result = await engine.applyHomebrewUpdate(update)
+                let result: (ok: Bool, message: String)
+                switch self.installMethod(update) {
+                case .homebrew:
+                    result = await engine.applyHomebrewUpdate(update)
+                case .sparkle:
+                    result = await engine.applySparkleUpdate(update, relaunch: relaunch.contains(update.appPath))
+                    if result.ok { trashedBytes += self.app(for: update)?.size ?? 0 }
+                case .handOff:
+                    result = (false, self.handOffReason(update) ?? "Open the app to install this update.")
+                }
                 self.setStatus(result.ok ? .updated : .failed(result.message), for: update.id)
                 if result.ok {
                     succeeded.append(update)
@@ -193,14 +242,16 @@ extension ApplicationsScreenModel {
                     self.replaceApp(fresh)
                 }
             }
+            let viaHomebrew = succeeded.allSatisfy(\.isUnattended)
             let outcome = RunOutcome(module: .applications, processedCount: succeeded.count,
                                      removedItemIDs: succeeded.map(\.id), failures: failures,
                                      summary: succeeded.isEmpty
                                         ? "No apps were updated"
-                                        : "Updated \(CountFormat.items(succeeded.count, singular: "app")) with Homebrew")
+                                        : "Updated \(CountFormat.items(succeeded.count, singular: "app"))" + (viaHomebrew ? " with Homebrew" : ""))
             if !succeeded.isEmpty { HistoryStore.shared.record(outcome, kind: .update) }
             if failures.isEmpty {
-                self.toast = ApplicationsToast(message: outcome.summary)
+                let note = trashedBytes > 0 ? ". Old versions are in the Trash." : ""
+                self.toast = ApplicationsToast(message: outcome.summary + note)
             } else if succeeded.isEmpty, failures.count == 1, let only = failures.first {
                 self.toast = ApplicationsToast(message: "\(only.title): \(only.reason)", isError: true)
             } else {

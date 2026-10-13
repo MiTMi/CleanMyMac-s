@@ -26,6 +26,19 @@ public enum ApplicationsInstallerKind: String, Codable, Sendable, CaseIterable {
     }
 }
 
+/// How Spruce tied an installer to an installed app.
+public enum ApplicationsInstallerMatch: String, Codable, Sendable {
+    /// The archive itself contains the app (read from the zip's directory).
+    case contents
+    /// The file name, without version and platform words, is the app's distinctive name.
+    case exactName
+    /// Only part of the name matches, or the app's name is a common word — a guess.
+    case partialName
+
+    /// Strong enough to pre-select an old installer.
+    public var isConfident: Bool { self != .partialName }
+}
+
 /// One installer found in Downloads or on the Desktop.
 public struct ApplicationsInstallerFile: Sendable, Hashable, Identifiable, Codable {
     public var id: String { path }
@@ -35,30 +48,51 @@ public struct ApplicationsInstallerFile: Sendable, Hashable, Identifiable, Codab
     public var modified: Date
     /// Name of the installed app this installer is for, if Spruce recognised it.
     public var installedApp: String?
+    /// How the installer was matched to `installedApp`.
+    public var match: ApplicationsInstallerMatch?
     /// The disk image is currently mounted.
     public var isAttached: Bool
+    /// The disk image is encrypted. Installers never are, so it most likely holds personal files.
+    public var isEncrypted: Bool
+    /// A word in the file name that suggests personal files ("backup", "photos"…).
+    public var personalWord: String?
     /// File identity at scan time (re-checked before removal).
     public var inode: UInt64?
 
     public init(path: String, kind: ApplicationsInstallerKind, size: Int64, modified: Date,
-                installedApp: String? = nil, isAttached: Bool = false, inode: UInt64? = nil) {
+                installedApp: String? = nil, isAttached: Bool = false, inode: UInt64? = nil,
+                match: ApplicationsInstallerMatch? = nil, isEncrypted: Bool = false, personalWord: String? = nil) {
         self.path = path
         self.kind = kind
         self.size = size
         self.modified = modified
         self.installedApp = installedApp
+        self.match = installedApp == nil ? nil : match
         self.isAttached = isAttached
+        self.isEncrypted = isEncrypted
+        self.personalWord = personalWord
         self.inode = inode
     }
 
-    /// Safe to pre-select: its app is installed, it is older than 30 days and not mounted.
+    /// Safe to pre-select: confidently matched to an installed app, older than 30 days, not
+    /// mounted, not encrypted, and nothing in its name suggests personal files.
     public func isSafe(now: Date = Date()) -> Bool {
-        installedApp != nil && !isAttached && now.timeIntervalSince(modified) > 30 * 86_400
+        guard installedApp != nil, match?.isConfident == true else { return false }
+        return !isAttached && !isEncrypted && personalWord == nil && now.timeIntervalSince(modified) > 30 * 86_400
     }
 
     public func note(now: Date = Date()) -> String {
         if isAttached { return "This disk image is mounted right now. Eject it before removing." }
+        if isEncrypted {
+            return "This disk image is encrypted. App installers never are, so it probably holds personal files — check before removing."
+        }
+        if let personalWord {
+            return "Its name contains \u{201C}\(personalWord)\u{201D}, so it may hold personal files rather than an app installer. Check before removing."
+        }
         if let installedApp {
+            guard match?.isConfident == true else {
+                return "It might be the installer of \(installedApp), but only part of the name matches. Check before removing."
+            }
             let age = now.timeIntervalSince(modified) > 30 * 86_400
                 ? "Downloaded more than a month ago."
                 : "Downloaded recently — keep it if you still need it."
@@ -70,30 +104,51 @@ public struct ApplicationsInstallerFile: Sendable, Hashable, Identifiable, Codab
 
 /// Finds old installers (.dmg, .pkg, app .zip archives, .xip) in Downloads and on the Desktop.
 public struct ApplicationsInstallerDetector {
+    /// An installed app installers are matched against.
+    public struct InstalledApp: Sendable, Hashable {
+        public var name: String
+        /// Apps that come with macOS never have installers in Downloads; they are not matched.
+        public var isSystem: Bool
+
+        public init(name: String, isSystem: Bool = false) {
+            self.name = name
+            self.isSystem = isSystem
+        }
+    }
+
     /// Folders and how deep to look (Downloads: two levels below, Desktop: top level).
     public var roots: [(path: String, depth: Int)]
     /// Top-level entries of a zip archive (nil when unreadable).
     public var zipEntries: (String) -> [String]?
+    /// True for encrypted disk images.
+    public var isEncryptedImage: (String) -> Bool
 
     public init(home: String = NSHomeDirectory(),
-                zipEntries: @escaping (String) -> [String]? = ApplicationsZipIndex.topLevelEntries(atPath:)) {
+                zipEntries: @escaping (String) -> [String]? = ApplicationsZipIndex.topLevelEntries(atPath:),
+                isEncryptedImage: @escaping (String) -> Bool = ApplicationsDiskImage.isEncrypted(atPath:)) {
         roots = [((home as NSString).appendingPathComponent("Downloads"), 2),
                  ((home as NSString).appendingPathComponent("Desktop"), 0)]
         self.zipEntries = zipEntries
+        self.isEncryptedImage = isEncryptedImage
     }
 
     public init(roots: [(path: String, depth: Int)],
-                zipEntries: @escaping (String) -> [String]? = ApplicationsZipIndex.topLevelEntries(atPath:)) {
+                zipEntries: @escaping (String) -> [String]? = ApplicationsZipIndex.topLevelEntries(atPath:),
+                isEncryptedImage: @escaping (String) -> Bool = ApplicationsDiskImage.isEncrypted(atPath:)) {
         self.roots = roots
         self.zipEntries = zipEntries
+        self.isEncryptedImage = isEncryptedImage
     }
 
-    /// Scans the roots. `installedAppNames` are app names (file name without ".app",
-    /// `CFBundleName`…); `attachedImages` are paths of mounted disk images.
+    /// Scans the roots. `installedAppNames` are names of third-party apps (file name without
+    /// ".app", `CFBundleName`…); `attachedImages` are paths of mounted disk images.
     public func scan(installedAppNames: [String], attachedImages: Set<String> = []) -> [ApplicationsInstallerFile] {
-        let normalizedApps = installedAppNames
-            .map { (name: $0, key: ApplicationsTokens.normalized($0)) }
-            .filter { $0.key.count >= 3 }
+        scan(installedApps: installedAppNames.map { InstalledApp(name: $0) }, attachedImages: attachedImages)
+    }
+
+    /// Scans the roots, matching installers to `installedApps` (system apps are ignored).
+    public func scan(installedApps: [InstalledApp], attachedImages: Set<String> = []) -> [ApplicationsInstallerFile] {
+        let normalizedApps = Self.matchable(installedApps)
         let attached = Set(attachedImages.map { ($0 as NSString).standardizingPath.lowercased() })
         var results: [ApplicationsInstallerFile] = []
         for root in roots {
@@ -106,16 +161,46 @@ public struct ApplicationsInstallerDetector {
                     return FileWalker.packageExtensions.contains(ext) || ext == "sparsebundle" ? .skipChildren : .continue
                 }
                 guard entry.isRegularFile, let kind = classify(path: entry.path, ext: ext) else { return .continue }
-                let appName = matchApp(fileName: entry.name, archiveEntries: kind == .appArchive ? zipEntries(entry.path) : nil,
-                                       installed: normalizedApps)
-                results.append(ApplicationsInstallerFile(
-                    path: entry.path, kind: kind, size: entry.allocatedSize, modified: entry.modified,
-                    installedApp: appName, isAttached: attached.contains((entry.path as NSString).standardizingPath.lowercased()),
-                    inode: entry.inode))
+                results.append(file(entry: entry, kind: kind, installed: normalizedApps, attached: attached))
                 return .continue
             }
         }
         return results.sorted { $0.size > $1.size }
+    }
+
+    /// Describes files the user handed to Spruce (dropped, or opened from Finder), wherever
+    /// they are. Files that are not installers are left out.
+    public func describe(paths: [String], installedApps: [InstalledApp], attachedImages: Set<String> = []) -> [ApplicationsInstallerFile] {
+        let normalizedApps = Self.matchable(installedApps)
+        let attached = Set(attachedImages.map { ($0 as NSString).standardizingPath.lowercased() })
+        return paths.compactMap { path in
+            guard let entry = FileWalker.entry(at: path), entry.isRegularFile || entry.isDirectory, !entry.isSymlink else { return nil }
+            let ext = (entry.name as NSString).pathExtension.lowercased()
+            // Flat packages are files; bundle-style .pkg/.mpkg installers are folders.
+            if entry.isDirectory && ext != "pkg" && ext != "mpkg" { return nil }
+            guard let kind = entry.isDirectory ? .package : classify(path: entry.path, ext: ext) else { return nil }
+            var measured = entry
+            if entry.isDirectory { measured.allocatedSize = DiskUsage.measure(path).bytes }
+            return file(entry: measured, kind: kind, installed: normalizedApps, attached: attached)
+        }
+    }
+
+    private func file(entry: FileEntry, kind: ApplicationsInstallerKind, installed: [(name: String, key: String)],
+                      attached: Set<String>) -> ApplicationsInstallerFile {
+        let matched = matchApp(fileName: entry.name, archiveEntries: kind == .appArchive ? zipEntries(entry.path) : nil,
+                               installed: installed)
+        return ApplicationsInstallerFile(
+            path: entry.path, kind: kind, size: entry.allocatedSize, modified: entry.modified,
+            installedApp: matched?.name, isAttached: attached.contains((entry.path as NSString).standardizingPath.lowercased()),
+            inode: entry.inode, match: matched?.match,
+            isEncrypted: kind == .diskImage && isEncryptedImage(entry.path),
+            personalWord: Self.personalWord(fileName: entry.name))
+    }
+
+    static func matchable(_ apps: [InstalledApp]) -> [(name: String, key: String)] {
+        apps.filter { !$0.isSystem }
+            .map { (name: $0.name, key: ApplicationsTokens.normalized($0.name)) }
+            .filter { $0.key.count >= 3 }
     }
 
     /// The installer kind of a file, or nil when it is not an installer. Zip files only count
@@ -139,6 +224,32 @@ public struct ApplicationsInstallerDetector {
         "signed", "full", "final", "build", "version", "v", "for", "the", "app", "download", "update", "en", "us",
     ]
 
+    /// Words in a file name that point to personal files rather than an app installer
+    /// ("Photos 2019.dmg", "Steam Library Backup.dmg"). Such files are never pre-selected.
+    public static let personalWords: Set<String> = [
+        "backup", "backups", "archive", "archives", "archived", "library", "photos", "photo", "pictures", "images",
+        "videos", "video", "movies", "music", "documents", "docs", "personal", "private", "encrypted", "vault",
+        "secure", "export", "exported", "copy", "files", "home", "family", "projects", "timemachine", "snapshot",
+        "clone", "scans", "taxes", "keys", "passwords", "wallet",
+    ]
+
+    /// The first word of `fileName` that suggests personal files, or nil.
+    public static func personalWord(fileName: String) -> String? {
+        let stem = (fileName as NSString).deletingPathExtension
+        let separators = CharacterSet(charactersIn: " -_.()[]+,")
+        for raw in stem.components(separatedBy: separators) where !raw.isEmpty {
+            var word = raw.lowercased()
+            while let last = word.last, last.isNumber { word.removeLast() }
+            if personalWords.contains(word) { return word }
+        }
+        return nil
+    }
+
+    /// True when a normalized app name is specific enough to recognise from a file name alone.
+    static func isDistinctiveKey(_ key: String) -> Bool {
+        key.count >= 3 && !ApplicationsTokens.commonWords.contains(key)
+    }
+
     /// Recognisable name of an installer file ("Firefox 121.0.dmg" → "firefox",
     /// "VSCode-darwin-universal.zip" → "vscode").
     public static func installerKey(fileName: String) -> String {
@@ -158,21 +269,46 @@ public struct ApplicationsInstallerDetector {
         return ApplicationsTokens.normalized(words.joined())
     }
 
-    func matchApp(fileName: String, archiveEntries: [String]?, installed: [(name: String, key: String)]) -> String? {
+    /// The installed app an installer belongs to, and how sure the match is.
+    ///
+    /// * The zip contains `<App>.app` → `.contents`.
+    /// * The file name is exactly a distinctive app name → `.exactName`.
+    /// * The name is a common word ("Notes"), or only a prefix matches ("Home Videos" vs
+    ///   "Home", "zoomusinstaller" vs "zoom.us") → `.partialName` (never pre-selected).
+    func matchApp(fileName: String, archiveEntries: [String]?,
+                  installed: [(name: String, key: String)]) -> (name: String, match: ApplicationsInstallerMatch)? {
         if let archiveEntries {
             for entry in archiveEntries where entry.lowercased().hasSuffix(".app") {
                 let key = ApplicationsTokens.normalized(String(entry.dropLast(4)))
-                if let app = installed.first(where: { $0.key == key }) { return app.name }
+                if let app = installed.first(where: { $0.key == key }) { return (app.name, .contents) }
             }
         }
         let key = Self.installerKey(fileName: fileName)
         guard key.count >= 3 else { return nil }
-        if let exact = installed.first(where: { $0.key == key }) { return exact.name }
-        // "googlechrome" ↔ "Google Chrome", "zoomusinstaller" ↔ "zoom.us".
-        let prefixMatches = installed.filter { app in
-            (app.key.count >= 4 && key.hasPrefix(app.key)) || (key.count >= 5 && app.key.hasPrefix(key))
+        if let exact = installed.first(where: { $0.key == key }) {
+            return (exact.name, Self.isDistinctiveKey(key) ? .exactName : .partialName)
         }
-        return prefixMatches.max(by: { $0.key.count < $1.key.count })?.name
+        // "googlechromebeta" ↔ "Google Chrome", "zoomusinstaller" ↔ "zoom.us": a guess, shown for review.
+        let prefixMatches = installed.filter { app in
+            Self.isDistinctiveKey(app.key)
+                && ((app.key.count >= 4 && key.hasPrefix(app.key)) || (key.count >= 5 && app.key.hasPrefix(key)))
+        }
+        return prefixMatches.max(by: { $0.key.count < $1.key.count }).map { ($0.name, .partialName) }
+    }
+}
+
+/// Reads just enough of a disk image to tell whether it is encrypted.
+public enum ApplicationsDiskImage {
+    /// True for encrypted disk images: the `encrcdsa` header (current format) or the
+    /// `cdsaencr` trailer (the original format).
+    public static func isEncrypted(atPath path: String) -> Bool {
+        guard let handle = FileHandle(forReadingAtPath: path) else { return false }
+        defer { try? handle.close() }
+        guard let head = try? handle.read(upToCount: 8) else { return false }
+        if head == Data("encrcdsa".utf8) { return true }
+        guard let size = try? handle.seekToEnd(), size >= 16 else { return false }
+        guard (try? handle.seek(toOffset: size - 8)) != nil, let tail = try? handle.read(upToCount: 8) else { return false }
+        return tail == Data("cdsaencr".utf8)
     }
 }
 

@@ -18,6 +18,7 @@ struct ApplicationsRootScreen: View {
     @Environment(AppModel.self) private var model
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var screen: ApplicationsScreenModel
+    @State private var isDropTargeted = false
 
     init(engine: ApplicationsEngine) {
         _screen = State(initialValue: ApplicationsScreenModel.shared(for: engine))
@@ -28,11 +29,27 @@ struct ApplicationsRootScreen: View {
             content
                 .id(routeKey)
                 .transition(.prismPhase(reduceMotion: reduceMotion))
+            if isDropTargeted {
+                ApplicationsDropOverlay()
+                    .transition(.opacity)
+            }
             ApplicationsToastHost(screen: screen)
         }
         .animation(Motion.adaptive(Motion.standard, reduceMotion: reduceMotion), value: routeKey)
-        .onAppear { consumePendingTool() }
+        .animation(Motion.quick, value: isDropTargeted)
+        // Apps dropped here open in the Uninstaller; installers are listed in Installers.
+        // A drop only shows things — removal always needs its own confirmation.
+        .dropDestination(for: URL.self) { urls, _ in
+            screen.receive(urls)
+        } isTargeted: { targeted in
+            isDropTargeted = targeted && screen.runState == .none && !screen.isInstallingUpdates
+        }
+        .onAppear {
+            consumePendingTool()
+            consumePendingFiles()
+        }
         .onChange(of: model.pendingTool) { _, _ in consumePendingTool() }
+        .onChange(of: model.pendingFiles) { _, _ in consumePendingFiles() }
         .sheet(item: $screen.uninstallRequest) { request in
             ApplicationsUninstallSheet(request: request,
                                        onConfirm: { screen.confirmUninstall() },
@@ -80,6 +97,50 @@ struct ApplicationsRootScreen: View {
         guard let toolID = model.pendingTool, let tool = ApplicationsTool(toolID: toolID) else { return }
         model.pendingTool = nil
         screen.open(tool)
+        // Files that came with the navigation are shown after the tool opened.
+        consumePendingFiles()
+    }
+
+    /// Apps and installers handed over from Finder (Services, Open With, the Dock icon).
+    private func consumePendingFiles() {
+        guard model.selection == .applications, !model.pendingFiles.isEmpty else { return }
+        let files = model.pendingFiles.filter { url in
+            let ext = url.pathExtension.lowercased()
+            return ext == "app" || ApplicationsScreenModel.installerExtensions.contains(ext)
+        }
+        guard !files.isEmpty else { return }
+        model.pendingFiles = []
+        screen.receive(files)
+    }
+}
+
+/// Shown while apps or installers are dragged over the module.
+struct ApplicationsDropOverlay: View {
+    @Environment(\.colorSchemeContrast) private var contrast
+
+    var body: some View {
+        let ink = PrismInk(contrast)
+        ZStack {
+            RoundedRectangle(cornerRadius: Radius.container, style: .continuous)
+                .fill(Color.black.opacity(0.35))
+            RoundedRectangle(cornerRadius: Radius.container, style: .continuous)
+                .strokeBorder(ModuleID.applications.palette.accent, style: StrokeStyle(lineWidth: 2, dash: [8, 6]))
+            VStack(spacing: Spacing.s) {
+                Image(systemName: "square.and.arrow.down")
+                    .font(.system(size: 30, weight: .light))
+                    .foregroundStyle(ModuleID.applications.palette.accentText)
+                Text("Drop apps to uninstall")
+                    .font(SpruceFont.headline)
+                    .foregroundStyle(Ink.primary)
+                Text("Spruce shows their files first. Installers (.dmg, .pkg, .zip) go to Installers.")
+                    .font(SpruceFont.callout)
+                    .foregroundStyle(ink.secondary)
+            }
+            .padding(Spacing.xl)
+        }
+        .padding(Spacing.l)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
     }
 }
 

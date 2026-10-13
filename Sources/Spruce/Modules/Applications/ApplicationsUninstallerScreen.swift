@@ -132,6 +132,9 @@ struct ApplicationsFacetColumn: View {
             VStack(alignment: .leading, spacing: 2) {
                 facetRow(.all)
                 facetRow(.unused)
+                if !screen.suspiciousApps.isEmpty {
+                    facetRow(.suspicious)
+                }
                 facetRow(.selected, hideZero: true)
                 ApplicationsFacetHeader(title: "Sources")
                 ForEach(screen.sourceFacets, id: \.self) { facet in
@@ -199,6 +202,7 @@ struct ApplicationsFacetColumn: View {
 
 struct ApplicationsAppListPane: View {
     @Bindable var screen: ApplicationsScreenModel
+    @Environment(AppModel.self) private var model
     @Environment(\.colorSchemeContrast) private var contrast
 
     var body: some View {
@@ -214,6 +218,13 @@ struct ApplicationsAppListPane: View {
                 ApplicationsBanner(symbol: "moon.zzz",
                                    text: "Apps you haven't opened in \(ApplicationsHubText.period(days: screen.settings.unusedAppDays)). Change the period in Settings.")
                     .padding(Spacing.s)
+            } else if screen.facet == .suspicious {
+                ApplicationsBanner(symbol: "exclamationmark.shield",
+                                   text: "Nothing vouches for who made these apps, or they were changed after signing. That isn't proof of harm — scan them for malware, and keep the ones you trust.",
+                                   tint: StatusColor.warning, actionTitle: "Scan for Malware") {
+                    model.open(.protection, tool: "protection.malware")
+                }
+                .padding(Spacing.s)
             }
             if apps.isEmpty {
                 emptyList
@@ -287,6 +298,7 @@ struct ApplicationsAppListPane: View {
         if !screen.search.isEmpty { return "No apps match \u{201C}\(screen.search)\u{201D}." }
         switch screen.facet {
         case .unused: return "Every app has been opened recently."
+        case .suspicious: return "No apps with security warnings."
         case .selected: return "No apps selected. Tick apps in any list to collect them here."
         case .intelOnly: return "All your apps run natively on Apple silicon."
         default: return "No apps in this group."
@@ -398,6 +410,7 @@ struct ApplicationsAppRow: View {
 
     private var secondaryLine: String {
         var parts: [String] = []
+        if let reason = ApplicationsSuspicion.reasons(app).first { return reason }
         if !app.versionLabel.isEmpty { parts.append(app.versionLabel) }
         if app.vendor != "Other" { parts.append(app.vendor) }
         parts.append(app.applicationsLastUsedText)

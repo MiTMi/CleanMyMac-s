@@ -260,7 +260,7 @@ struct ApplicationsUpdatesTile: View {
 
     var body: some View {
         let pending = screen.pendingUpdates
-        let homebrew = pending.filter(\.isUnattended)
+        let installable = pending.filter { screen.isInstallable($0) }
         ApplicationsHubTile(symbol: "arrow.down.circle", title: "Updates", metric: metric(pending.count),
                             caption: caption(pending.count), status: status(pending.count),
                             isWorking: screen.updatesPhase == .loading || screen.isInstallingUpdates,
@@ -292,9 +292,11 @@ struct ApplicationsUpdatesTile: View {
                 CapsuleButton(title: "Check for Updates", symbol: "arrow.clockwise", prominent: true) { screen.open(.updater) }
             } else {
                 CapsuleButton(title: "Review", symbol: "eye") { screen.open(.updater) }
-                if !homebrew.isEmpty && !screen.isInstallingUpdates {
-                    CapsuleButton(title: "Update \(homebrew.count) with Homebrew", symbol: "mug", prominent: true) {
-                        screen.installHomebrew(homebrew)
+                if !installable.isEmpty && !screen.isInstallingUpdates {
+                    let onlyHomebrew = installable.allSatisfy(\.isUnattended)
+                    CapsuleButton(title: onlyHomebrew ? "Update \(installable.count) with Homebrew" : "Update \(installable.count)",
+                                  symbol: onlyHomebrew ? "mug" : "arrow.down.circle", prominent: true) {
+                        screen.installUpdates(installable)
                     }
                 }
             }

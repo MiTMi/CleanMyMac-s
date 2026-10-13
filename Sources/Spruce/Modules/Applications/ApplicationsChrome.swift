@@ -298,10 +298,25 @@ struct ApplicationsAppBadges: View {
                 PrismChip(text: "32-bit", color: StatusColor.danger, symbol: "xmark.octagon")
                     .help("32-bit apps can't open on current macOS.")
             }
+            if let label = suspicionLabel {
+                PrismChip(text: label, color: StatusColor.warning, symbol: "exclamationmark.shield")
+                    .help(ApplicationsSuspicion.reasons(app).joined(separator: " "))
+            }
             if !compact && app.prefersVendorUninstaller {
                 PrismChip(text: "Own uninstaller", color: StatusColor.warning, symbol: "exclamationmark.shield")
                     .help("This vendor ships its own uninstaller; use it for a complete removal.")
             }
+        }
+    }
+
+    /// Short label for the Suspicious group's signals.
+    private var suspicionLabel: String? {
+        guard ApplicationsSuspicion.isSuspicious(app) else { return nil }
+        switch app.codeSignature {
+        case .broken: return "Broken signature"
+        case .unsigned: return "Unsigned"
+        case .adHoc: return "No developer ID"
+        case .identified, .unknown: return "Not approved"
         }
     }
 

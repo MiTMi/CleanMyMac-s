@@ -108,22 +108,7 @@ enum ApplicationsUninstaller {
         }
 
         // Unload launch agents and daemons first so nothing respawns from the Trash.
-        let home = NSHomeDirectory()
-        var systemDaemons: [String] = []
-        for item in removable {
-            guard let path = item.url?.path, path.hasSuffix(".plist") else { continue }
-            if path.hasPrefix(home + "/Library/LaunchAgents/") || path.hasPrefix("/Library/LaunchAgents/") {
-                _ = await Shell.run("/bin/launchctl", ["bootout", "gui/\(ApplicationsMac.uid)", path], timeout: 15)
-            } else if path.hasPrefix("/Library/LaunchDaemons/"),
-                      !(path as NSString).lastPathComponent.lowercased().hasPrefix("com.apple.") {
-                systemDaemons.append(path)
-            }
-        }
-        if !systemDaemons.isEmpty {
-            progress?(ScanProgress(fraction: nil, message: "Stopping background helpers (administrator approval)…"))
-            let invocations = systemDaemons.map { PrivilegedRunner.Invocation("/bin/launchctl", ["bootout", "system", $0]) }
-            _ = try? await PrivilegedRunner.shared.run(invocations)
-        }
+        await unloadLaunchJobs(in: removable, progress: progress)
 
         // Root-owned items (pkg-installed apps, /Library helpers) go to the Trash with one
         // administrator prompt.
@@ -159,6 +144,27 @@ enum ApplicationsUninstaller {
 
         outcome.summary = summary(items: removable, outcome: outcome)
         return outcome
+    }
+
+    /// Unloads the launch agents and daemons among `items` (`launchctl bootout`), so nothing
+    /// respawns from the Trash. Daemons in `/Library/LaunchDaemons` need one administrator
+    /// approval; Apple's jobs are never touched.
+    static func unloadLaunchJobs(in items: [ScanItem], progress: ProgressHandler?) async {
+        let home = NSHomeDirectory()
+        var systemDaemons: [String] = []
+        for item in items where item.deletion != .custom {
+            guard let path = item.url?.path, path.hasSuffix(".plist") else { continue }
+            if (path as NSString).lastPathComponent.lowercased().hasPrefix("com.apple.") { continue }
+            if path.hasPrefix(home + "/Library/LaunchAgents/") || path.hasPrefix("/Library/LaunchAgents/") {
+                _ = await Shell.run("/bin/launchctl", ["bootout", "gui/\(ApplicationsMac.uid)", path], timeout: 15)
+            } else if path.hasPrefix("/Library/LaunchDaemons/") {
+                systemDaemons.append(path)
+            }
+        }
+        guard !systemDaemons.isEmpty else { return }
+        progress?(ScanProgress(fraction: nil, message: "Stopping background helpers (administrator approval)…"))
+        let invocations = systemDaemons.map { PrivilegedRunner.Invocation("/bin/launchctl", ["bootout", "system", $0]) }
+        _ = try? await PrivilegedRunner.shared.run(invocations)
     }
 
     static func summary(items: [ScanItem], outcome: RunOutcome) -> String {

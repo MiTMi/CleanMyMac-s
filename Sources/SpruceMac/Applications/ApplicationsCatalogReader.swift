@@ -126,7 +126,8 @@ struct ApplicationsCatalogReader {
         }
         if source == .setapp || source == .appStore { feed = nil }
 
-        let signing = Self.signingInfo(path: path)
+        let signing = Self.signingInfo(path: path, checkValidity: !isSystem)
+        let edKey = (plist["SUPublicEDKey"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
         let vendor = ApplicationsVendorName.derive(certificateSummary: signing.certificateSummary, bundleID: bundleID)
         let dates = Self.spotlightDates(path: path)
         let standardized = (path as NSString).standardizingPath
@@ -142,7 +143,9 @@ struct ApplicationsCatalogReader {
             sparkleFeedURL: feed, caskToken: context.caskTokens[(path as NSString).lastPathComponent.lowercased()],
             prefersVendorUninstaller: Self.vendorUninstallerPrefixes.contains { lowerID.hasPrefix($0) },
             appGroups: signing.appGroups, embeddedBundleIDs: isSystem ? [] : Self.embeddedBundleIDs(contents: contents),
-            names: names)
+            names: names, sparklePublicEDKey: edKey?.isEmpty == false ? edKey : nil,
+            codeSignature: isSystem ? .identified : signing.signature,
+            isQuarantined: !isSystem && Self.isQuarantinedUnapproved(path: path))
     }
 
     private func isSteamLauncher(contents: String) -> Bool {
@@ -169,10 +172,13 @@ struct ApplicationsCatalogReader {
         var teamID: String?
         var certificateSummary: String?
         var appGroups: [String]
+        var signature: ApplicationsCodeSignature = .unknown
     }
 
-    /// Team id, leaf certificate summary and app-group entitlements (signature not validated).
-    static func signingInfo(path: String) -> SigningInfo {
+    /// Team id, leaf certificate summary and app-group entitlements. With `checkValidity`,
+    /// also checks the signature of the main executable (not every resource — that would
+    /// take minutes for large apps) to tell signed, ad-hoc, unsigned and broken apart.
+    static func signingInfo(path: String, checkValidity: Bool = false) -> SigningInfo {
         var result = SigningInfo(teamID: nil, certificateSummary: nil, appGroups: [])
         var staticCode: SecStaticCode?
         guard SecStaticCodeCreateWithPath(URL(fileURLWithPath: path) as CFURL, SecCSFlags(), &staticCode) == errSecSuccess,
@@ -181,14 +187,45 @@ struct ApplicationsCatalogReader {
         guard SecCodeCopySigningInformation(code, SecCSFlags(rawValue: kSecCSSigningInformation), &information) == errSecSuccess,
               let info = information as? [String: Any] else { return result }
         result.teamID = info[kSecCodeInfoTeamIdentifier as String] as? String
-        if let certificates = info[kSecCodeInfoCertificates as String] as? [SecCertificate], let leaf = certificates.first {
+        let certificates = info[kSecCodeInfoCertificates as String] as? [SecCertificate] ?? []
+        if let leaf = certificates.first {
             result.certificateSummary = SecCertificateCopySubjectSummary(leaf) as String?
         }
         if let entitlements = info[kSecCodeInfoEntitlementsDict as String] as? [String: Any],
            let groups = entitlements["com.apple.security.application-groups"] as? [String] {
             result.appGroups = groups
         }
+        if checkValidity {
+            let flags = (info[kSecCodeInfoFlags as String] as? NSNumber)?.uint32Value ?? 0
+            let status = SecStaticCodeCheckValidity(code, SecCSFlags(rawValue: UInt32(kSecCSDoNotValidateResources)), nil)
+            if status == OSStatus(errSecCSUnsigned) || info[kSecCodeInfoIdentifier as String] == nil {
+                result.signature = .unsigned
+            } else if status != errSecSuccess {
+                result.signature = .broken
+            } else if flags & adHocFlag != 0 || certificates.isEmpty {
+                result.signature = .adHoc
+            } else {
+                result.signature = .identified
+            }
+        }
         return result
+    }
+
+    /// `kSecCodeSignatureAdhoc`.
+    static let adHocFlag: UInt32 = 0x0002
+
+    /// True when the bundle carries a quarantine mark that macOS hasn't cleared on first
+    /// launch (the "user approved" flag, 0x40, is not set).
+    static func isQuarantinedUnapproved(path: String) -> Bool {
+        let name = "com.apple.quarantine"
+        let length = getxattr(path, name, nil, 0, 0, 0)
+        guard length > 0 else { return false }
+        var buffer = [UInt8](repeating: 0, count: length)
+        let read = getxattr(path, name, &buffer, length, 0, 0)
+        guard read > 0 else { return false }
+        let value = String(decoding: buffer.prefix(read), as: UTF8.self)
+        guard let field = value.split(separator: ";").first, let flags = UInt32(field, radix: 16) else { return false }
+        return flags & 0x40 == 0
     }
 
     // MARK: Embedded bundles

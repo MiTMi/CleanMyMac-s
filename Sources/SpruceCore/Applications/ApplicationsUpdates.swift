@@ -31,7 +31,7 @@ public enum ApplicationsUpdateSource: String, Codable, Sendable, CaseIterable {
     public var actionDetail: String {
         switch self {
         case .appStore: return "Updates are installed by the App Store app."
-        case .sparkle: return "The app downloads and installs this update itself when you open it."
+        case .sparkle: return "When the developer signs the download, Spruce installs it after checking the signature; otherwise the app installs it when you open it."
         case .homebrew: return "Spruce runs Homebrew to download and install this update."
         }
     }
@@ -60,11 +60,18 @@ public struct ApplicationsUpdate: Identifiable, Hashable, Sendable, Codable {
     public var isMajor: Bool
     public var isCritical: Bool
     public var minimumSystemVersion: String?
+    /// Sparkle: base64 Ed25519 signature of the download (`sparkle:edSignature`).
+    public var edSignature: String?
+    /// Sparkle: the build number (`sparkle:version`) the download installs.
+    public var availableBuild: String?
+    /// Sparkle: `sparkle:installationType` (nil = a plain app archive).
+    public var installationType: String?
 
     public init(appPath: String, bundleID: String, name: String, installedVersion: String, availableVersion: String,
                 source: ApplicationsUpdateSource, releaseNotes: String? = nil, releaseNotesURL: URL? = nil,
                 downloadURL: URL? = nil, storeURL: URL? = nil, caskToken: String? = nil, releaseDate: Date? = nil,
-                downloadSize: Int64? = nil, isMajor: Bool = false, isCritical: Bool = false, minimumSystemVersion: String? = nil) {
+                downloadSize: Int64? = nil, isMajor: Bool = false, isCritical: Bool = false, minimumSystemVersion: String? = nil,
+                edSignature: String? = nil, availableBuild: String? = nil, installationType: String? = nil) {
         self.appPath = appPath
         self.bundleID = bundleID
         self.name = name
@@ -81,6 +88,9 @@ public struct ApplicationsUpdate: Identifiable, Hashable, Sendable, Codable {
         self.isMajor = isMajor
         self.isCritical = isCritical
         self.minimumSystemVersion = minimumSystemVersion
+        self.edSignature = edSignature
+        self.availableBuild = availableBuild
+        self.installationType = installationType
     }
 
     /// Homebrew updates can be applied without the user (Checkup "Run").
@@ -123,6 +133,97 @@ public enum ApplicationsUpdateIgnore {
     }
 }
 
+// MARK: - Installing
+
+/// How an update gets installed.
+public enum ApplicationsUpdateInstallMethod: String, Sendable, Equatable {
+    /// `brew upgrade --cask`.
+    case homebrew
+    /// Spruce downloads the developer-signed archive, verifies it and replaces the app.
+    case sparkle
+    /// The App Store, the app itself or the developer's page installs it.
+    case handOff
+}
+
+/// Rules for installing Sparkle updates in place (download → verify → replace).
+///
+/// Spruce only installs an update itself when every check can be made: the archive is
+/// signed with the developer's EdDSA key (`sparkle:edSignature` against the app's
+/// `SUPublicEDKey`), it comes over HTTPS, and the installed app has a Team ID that the new
+/// version must match. Everything else is handed off to the app's own updater.
+public enum ApplicationsSparkleInstallPlan {
+    public enum ArchiveKind: String, Sendable, Equatable {
+        case zip
+        case diskImage
+        /// tar, optionally gzip/bzip2/xz compressed.
+        case tar
+    }
+
+    /// Largest download Spruce installs (bigger updates are left to the app).
+    public static let maximumDownload: Int64 = 4_000_000_000
+
+    public static func method(for update: ApplicationsUpdate, app: ApplicationsAppInfo?) -> ApplicationsUpdateInstallMethod {
+        switch update.source {
+        case .homebrew: return update.isUnattended ? .homebrew : .handOff
+        case .appStore: return .handOff
+        case .sparkle: return blocker(update: update, app: app) == nil ? .sparkle : .handOff
+        }
+    }
+
+    /// Why Spruce can't install this Sparkle update itself, or nil when it can.
+    public static func blocker(update: ApplicationsUpdate, app: ApplicationsAppInfo?) -> String? {
+        guard update.source == .sparkle else { return "This update is installed by \(update.source.title)." }
+        guard let app, app.path == update.appPath else { return "The app wasn't found." }
+        if app.isSystem { return "Apps that come with macOS update with macOS." }
+        if update.isMajor { return "A major upgrade — check the developer's page first." }
+        guard let url = update.downloadURL, url.scheme?.lowercased() == "https" else {
+            return "The download isn't offered over a secure connection."
+        }
+        if let type = update.installationType?.lowercased(), !type.isEmpty, type != "application" {
+            return "This update is an installer package; the app installs it itself."
+        }
+        let ext = url.pathExtension.lowercased()
+        if ["pkg", "mpkg", "delta", "app", "exe", "msi"].contains(ext) {
+            return "This update is an installer package; the app installs it itself."
+        }
+        if let size = update.downloadSize, size > maximumDownload { return "The download is very large; let the app install it." }
+        guard let signature = update.edSignature, Data(base64Encoded: signature)?.count == 64 else {
+            return "The developer doesn't sign this download, so the app installs it itself."
+        }
+        guard let key = app.sparklePublicEDKey, Data(base64Encoded: key)?.count == 32 else {
+            return "The app doesn't carry the developer's signing key, so it installs the update itself."
+        }
+        guard let team = app.teamID, !team.isEmpty else {
+            return "The app isn't signed by an identified developer, so the new version can't be checked against it."
+        }
+        return nil
+    }
+
+    /// The archive kind from the first and last bytes of a download, or nil when it is
+    /// something Spruce doesn't unpack (installer packages, encrypted disk images, HTML…).
+    public static func sniff(header: Data, trailer: Data) -> ArchiveKind? {
+        let h = [UInt8](header)
+        func starts(_ bytes: [UInt8]) -> Bool { h.count >= bytes.count && Array(h.prefix(bytes.count)) == bytes }
+        if starts([0x50, 0x4B, 0x03, 0x04]) { return .zip }
+        if starts([0x1F, 0x8B]) || starts([0x42, 0x5A, 0x68]) || starts([0xFD, 0x37, 0x7A, 0x58, 0x5A, 0x00]) { return .tar }
+        if h.count >= 262, Array(h[257..<262]) == Array("ustar".utf8) { return .tar }
+        if starts(Array("encrcdsa".utf8)) || starts(Array("xar!".utf8)) { return nil }
+        // UDIF disk images end with a 512-byte "koly" trailer.
+        let t = [UInt8](trailer)
+        if t.count >= 512, Array(t[(t.count - 512)..<(t.count - 508)]) == Array("koly".utf8) { return .diskImage }
+        return nil
+    }
+
+    /// True when the unpacked app may replace the installed one: same bundle id, and a newer
+    /// version (by build, then by version string).
+    public static func acceptsReplacement(installed: ApplicationsAppInfo, newBundleID: String, newVersion: String,
+                                          newBuild: String) -> Bool {
+        guard newBundleID.caseInsensitiveCompare(installed.bundleID) == .orderedSame else { return false }
+        return ApplicationsVersion.isUpdate(availableVersion: newVersion, availableBuild: newBuild,
+                                            installedVersion: installed.version, installedBuild: installed.build)
+    }
+}
+
 // MARK: - Sparkle → update
 
 public extension ApplicationsUpdate {
@@ -144,7 +245,9 @@ public extension ApplicationsUpdate {
             appPath: app.path, bundleID: app.bundleID, name: app.name, installedVersion: app.version.isEmpty ? app.build : app.version,
             availableVersion: item.displayVersion, source: .sparkle, releaseNotes: notes, releaseNotesURL: notesLink,
             downloadURL: download, releaseDate: item.pubDate, downloadSize: item.enclosureLength, isMajor: major,
-            isCritical: item.isCritical, minimumSystemVersion: item.minimumSystemVersion)
+            isCritical: item.isCritical, minimumSystemVersion: item.minimumSystemVersion,
+            edSignature: item.isInformational ? nil : item.edSignature, availableBuild: item.version,
+            installationType: item.installationType)
     }
 }
 
