@@ -19,8 +19,28 @@ public enum PerformanceTaskEvent: Sendable {
 /// Root work goes through `PrivilegedRunner` only, batched into one administrator prompt
 /// per run; files leave the disk only through `FileRemover`.
 public final class PerformanceEngine: CheckupContributor, GroupScanner, @unchecked Sendable {
-    public var checkupReview: [ScanGroup] = []
     public let module: ModuleID = .performance
+
+    /// Guards `reviewStorage`: Checkup scans and runs write it off the main actor while the
+    /// review sheet reads and edits it on the main actor.
+    private let reviewLock = NSLock()
+    private var reviewStorage: [ScanGroup] = []
+
+    public var checkupReview: [ScanGroup] {
+        get { lockedReview { $0 } }
+        set { lockedReview { $0 = newValue } }
+    }
+
+    private func lockedReview<T>(_ body: (inout [ScanGroup]) -> T) -> T {
+        reviewLock.lock()
+        defer { reviewLock.unlock() }
+        return body(&reviewStorage)
+    }
+
+    /// The user's settings, read on the main actor (Settings edits them there at any time).
+    func currentSettings() async -> SpruceSettings {
+        await MainActor.run { SettingsStore.shared.settings }
+    }
 
     let defaults: UserDefaults
     static let lastRunPrefix = "Spruce.Performance.lastRun."
@@ -248,9 +268,13 @@ public final class PerformanceEngine: CheckupContributor, GroupScanner, @uncheck
     }
 
     static func commandFailure(_ result: Shell.Result, executable: String) -> String {
-        let message = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+        commandFailure(status: result.status, stderr: result.stderr, executable: executable)
+    }
+
+    static func commandFailure(status: Int32, stderr: String, executable: String) -> String {
+        let message = stderr.trimmingCharacters(in: .whitespacesAndNewlines)
         let tool = (executable as NSString).lastPathComponent
-        if message.isEmpty { return "\(tool) stopped with error \(result.status)." }
+        if message.isEmpty { return "\(tool) stopped with error \(status)." }
         let firstLine = message.components(separatedBy: "\n").first ?? message
         return "\(tool): \(firstLine)"
     }
@@ -303,11 +327,18 @@ public final class PerformanceEngine: CheckupContributor, GroupScanner, @uncheck
     /// (`lsregister -kill` was removed by Apple, and the database is per user.)
     private func unregisterStaleLaunchServices() async -> StepOutcome {
         let tool = PerformanceTaskCatalog.lsregisterPath
-        let dump = await Shell.run(tool, ["-dump"], timeout: 300)
-        guard !dump.stdout.isEmpty else {
-            return .failed("Couldn't read the Launch Services database. " + Self.commandFailure(dump, executable: tool))
+        // The dump can be hundreds of MB: read it as it arrives and keep only the app paths.
+        let collector = PerformanceDumpCollector()
+        let dump = await PerformanceStreamingShell.run(tool, ["-dump"], timeout: 300) { chunk in
+            collector.reader.consume(chunk)
         }
-        let stale = PerformanceLaunchServices.stalePaths(fromDump: dump.stdout,
+        collector.reader.finish()
+        if Task.isCancelled { return .skipped("Stopped before it finished") }
+        guard collector.reader.byteCount > 0 else {
+            return .failed("Couldn't read the Launch Services database. "
+                           + Self.commandFailure(status: dump.status, stderr: dump.stderr, executable: tool))
+        }
+        let stale = PerformanceLaunchServices.stalePaths(from: collector.reader.paths,
                                                          fileExists: { FileManager.default.fileExists(atPath: $0) })
         for path in stale {
             if Task.isCancelled { break }
@@ -328,8 +359,10 @@ public final class PerformanceEngine: CheckupContributor, GroupScanner, @uncheck
     public func scan(progress: @escaping ProgressHandler) async throws -> [ScanGroup] {
         progress(ScanProgress(fraction: nil, message: "Checking what your Mac needs…"))
         let states = await assessTasks()
+        try Task.checkCancellation()
+        let settings = await currentSettings()
         progress(ScanProgress(fraction: 1, message: "Done"))
-        return SettingsStore.shared.settings.filteringIgnored([PerformanceTaskItems.group(for: states, onlyRecommended: false)])
+        return settings.filteringIgnored([PerformanceTaskItems.group(for: states, onlyRecommended: false)])
     }
 
     public func perform(_ items: [ScanItem], progress: @escaping ProgressHandler) async throws -> RunOutcome {
@@ -347,8 +380,11 @@ public final class PerformanceEngine: CheckupContributor, GroupScanner, @uncheck
     public func checkupScan(progress: @escaping ProgressHandler) async throws -> CheckupTile {
         progress(ScanProgress(fraction: nil, message: "Checking maintenance tasks…"))
         let states = await assessTasks()
+        // A stopped scan must not replace the review of the scan that follows it.
+        try Task.checkCancellation()
         let group = PerformanceTaskItems.group(for: states, onlyRecommended: true)
-        let review = SettingsStore.shared.settings.filteringIgnored(group.isEmpty ? [] : [group])
+        let review = await currentSettings().filteringIgnored(group.isEmpty ? [] : [group])
+        try Task.checkCancellation()
         checkupReview = review
         let kept = Set(review.allItems.map(\.id))
         progress(ScanProgress(fraction: 1, message: "Done"))
@@ -361,7 +397,8 @@ public final class PerformanceEngine: CheckupContributor, GroupScanner, @uncheck
         // Checkup never interrupts with a quit dialog: tasks whose apps are open report it.
         let results = await runTasks(ids, progress: progress)
         let outcome = PerformanceRunSummary.outcome(results)
-        checkupReview.removeItems(withIDs: Set(outcome.removedItemIDs))
+        let done = Set(outcome.removedItemIDs)
+        lockedReview { $0.removeItems(withIDs: done) }
         return outcome
     }
 }

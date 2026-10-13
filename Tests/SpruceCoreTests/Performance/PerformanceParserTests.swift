@@ -243,3 +243,59 @@ final class PerformanceConsumerTests: XCTestCase {
         XCTAssertFalse(l.memory)
     }
 }
+
+final class PerformanceLaunchServicesDumpReaderTests: XCTestCase {
+    private let dump = """
+    bundle id:                  12345
+    \tpath:                       /Applications/Safari.app (0x1a2b)\r
+    path:                       /Applications/Deleted.app (0x3c4d)
+    path:                       /Applications/Deleted.app (0x3c4e)
+    name:                       path: /Applications/NotAPathLine.app
+    path: /Users/t/Downloads/Old Thing.app
+    path:                       /Applications/Foo.app/Contents/Resources/doc.pdf (0x1)
+    path:                       /Applications/Ünïcode.app (0x5)
+    path:                       /Applications/Last.app
+    """
+    private let expected = ["/Applications/Safari.app", "/Applications/Deleted.app", "/Users/t/Downloads/Old Thing.app",
+                            "/Applications/Ünïcode.app", "/Applications/Last.app"]
+
+    func testSameResultWhateverTheChunkSize() {
+        let data = Data(dump.utf8)
+        XCTAssertEqual(PerformanceLaunchServices.registeredAppPaths(fromDump: dump), expected)
+        for size in [1, 2, 3, 7, 16, 64, data.count] {
+            var reader = PerformanceLaunchServicesDumpReader()
+            var offset = 0
+            while offset < data.count {
+                let end = min(offset + size, data.count)
+                reader.consume(data.subdata(in: offset..<end))
+                offset = end
+            }
+            reader.finish()
+            XCTAssertEqual(reader.paths, expected, "chunk size \(size)")
+            XCTAssertEqual(reader.byteCount, data.count)
+        }
+    }
+
+    func testOverlongLinesAreSkippedNotBuffered() {
+        let long = "path: /" + String(repeating: "x", count: PerformanceLaunchServicesDumpReader.maxLineLength) + ".app\n"
+        let text = long + "path: /Applications/After.app\n" + String(long.dropLast())
+        let data = Data(text.utf8)
+        for size in [5, 1000, data.count] {
+            var reader = PerformanceLaunchServicesDumpReader()
+            var offset = 0
+            while offset < data.count {
+                let end = min(offset + size, data.count)
+                reader.consume(data.subdata(in: offset..<end))
+                offset = end
+            }
+            reader.finish()
+            XCTAssertEqual(reader.paths, ["/Applications/After.app"], "chunk size \(size)")
+        }
+    }
+
+    func testStalePathsFromCollectedList() {
+        let stale = PerformanceLaunchServices.stalePaths(from: expected, fileExists: { $0 == "/Applications/Safari.app" })
+        XCTAssertEqual(stale, ["/Applications/Deleted.app", "/Users/t/Downloads/Old Thing.app", "/Applications/Ünïcode.app",
+                               "/Applications/Last.app"])
+    }
+}

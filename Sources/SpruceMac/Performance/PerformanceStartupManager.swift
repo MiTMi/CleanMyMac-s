@@ -28,7 +28,8 @@ public struct PerformanceStartupInventory: Sendable {
     public var backgroundItems: [PerformanceStartupItem] { items.filter(\.isBackground) }
 }
 
-/// Runs AppleScript in-process on one serial queue (NSAppleScript is not thread-safe).
+/// Runs AppleScript in-process through `AppleScriptExecutor.shared`, the app's one serial
+/// AppleScript queue (NSAppleScript is not thread-safe).
 enum PerformanceAppleScriptRunner {
     enum Result: Sendable {
         case success(String)
@@ -38,25 +39,12 @@ enum PerformanceAppleScriptRunner {
     /// errAEEventNotPermitted / errAEEventWouldRequireUserConsent: Automation access was declined.
     static let deniedCodes: Set<Int> = [-1743, -1744]
 
-    private static let queue = DispatchQueue(label: "Spruce.Performance.AppleScript", qos: .userInitiated)
-
     static func run(_ source: String) async -> Result {
-        await withCheckedContinuation { continuation in
-            queue.async {
-                guard let script = NSAppleScript(source: source) else {
-                    continuation.resume(returning: .failure(code: 0, message: "The script couldn't be prepared."))
-                    return
-                }
-                var errorInfo: NSDictionary?
-                let output = script.executeAndReturnError(&errorInfo)
-                if let errorInfo {
-                    let code = errorInfo[NSAppleScript.errorNumber] as? Int ?? 0
-                    let message = errorInfo[NSAppleScript.errorMessage] as? String ?? "AppleScript error \(code)."
-                    continuation.resume(returning: .failure(code: code, message: message))
-                } else {
-                    continuation.resume(returning: .success(output.stringValue ?? ""))
-                }
-            }
+        switch await AppleScriptExecutor.shared.run(source) {
+        case .success(let output):
+            return .success(output)
+        case .failure(let code, let message):
+            return .failure(code: code, message: message)
         }
     }
 }
@@ -65,8 +53,10 @@ extension PerformanceEngine {
     // MARK: - Inventory
 
     /// Lists launch agents and daemons (Apple's skipped), classic login items and items
-    /// registered by apps, with their launchd state, vendor and broken status.
+    /// registered by apps, with their launchd state, vendor and broken status. Items on the
+    /// ignore list are left out.
     public func startupInventory() async -> PerformanceStartupInventory {
+        let settings = await currentSettings()
         let home = NSHomeDirectory()
         let uid = getuid()
         let apps = PerformanceAppIndex(apps: PerformanceAppScanner.scan(folders: PerformanceAppScanner.defaultFolders(home: home)))
@@ -118,7 +108,8 @@ extension PerformanceEngine {
             }
         }
         items += appRegisteredItems(apps: apps, user: userState, system: systemState, knownLabels: labels, excluded: excluded)
-        return PerformanceStartupInventory(items: items, loginItemsAccess: access)
+        return PerformanceStartupInventory(items: PerformanceStartupIgnore.filtered(items, settings: settings),
+                                           loginItemsAccess: access)
     }
 
     func launchState(domain: String, allowListFallback: Bool) async -> PerformanceLaunchDomainState {
@@ -224,13 +215,19 @@ extension PerformanceEngine {
 
     /// Turns items on or off, reversibly. Agents use `launchctl` in your session; daemons are
     /// batched into one administrator prompt. Classic login items are removed from System
-    /// Events and remembered so they can be turned back on.
+    /// Events and remembered so they can be turned back on. Items on the ignore list are
+    /// left alone.
     public func setEnabled(_ items: [PerformanceStartupItem], enabled: Bool) async -> RunOutcome {
         var failures: [ItemFailure] = []
         var succeeded: [String] = []
         var launchItems: [PerformanceStartupItem] = []
+        let settings = await currentSettings()
 
         for item in items {
+            if PerformanceStartupIgnore.isIgnored(item, settings: settings) {
+                failures.append(ItemFailure(itemID: item.id, title: item.name, reason: PerformanceStartupIgnore.refusalReason))
+                continue
+            }
             guard item.canToggle else {
                 failures.append(ItemFailure(itemID: item.id, title: item.name,
                                             reason: "Its app registered it, so it's changed in System Settings › General › Login Items."))
@@ -370,13 +367,16 @@ extension PerformanceEngine {
         }
     }
 
+    /// Deletes the login item that opens the item's path (never every item that shares its
+    /// name). Same-path duplicates go with it; re-adding that path brings them back as one.
     /// Returns nil on success, or the reason it failed.
     private func removeLoginItem(_ item: PerformanceStartupItem, remember: Bool) async -> String? {
-        let result = await PerformanceAppleScriptRunner.run(PerformanceAppleScript.deleteLoginItemSource(name: item.name))
+        let path = item.executablePath ?? ""
+        let result = await PerformanceAppleScriptRunner.run(PerformanceAppleScript.deleteLoginItemSource(name: item.name, path: path))
         switch result {
         case .success:
-            var saved = savedDisabledLoginItems().filter { !($0.name == item.name && $0.path == (item.executablePath ?? "")) }
-            if remember, let path = item.executablePath, !path.isEmpty {
+            var saved = savedDisabledLoginItems().filter { !($0.name == item.name && $0.path == path) }
+            if remember, !path.isEmpty {
                 saved.append(PerformanceLegacyLoginItem(name: item.name, path: path, hidden: item.opensHidden))
             }
             setSavedDisabledLoginItems(saved)
@@ -411,27 +411,32 @@ extension PerformanceEngine {
 
     /// Removes items for good: launchd jobs are stopped, then their plist goes to the Trash
     /// through `FileRemover` (recoverable). Classic login items are deleted from System Events.
-    /// Files owned by the system stay in place but are left switched off.
+    /// Files owned by the system stay in place but are left switched off. Items on the ignore
+    /// list are refused before anything is stopped.
     public func remove(_ items: [PerformanceStartupItem]) async -> RunOutcome {
         var failures: [ItemFailure] = []
         var succeeded: [String] = []
         var launchItems: [PerformanceStartupItem] = []
+        let settings = await currentSettings()
 
         for item in items {
+            if PerformanceStartupIgnore.isIgnored(item, settings: settings) {
+                failures.append(ItemFailure(itemID: item.id, title: item.name, reason: PerformanceStartupIgnore.refusalReason))
+                continue
+            }
             guard item.canRemove else {
                 failures.append(ItemFailure(itemID: item.id, title: item.name,
                                             reason: "It's part of \(item.vendorName). Turn it off in System Settings, or uninstall the app."))
                 continue
             }
             if item.kind == .loginItem {
-                if let reason = await removeLoginItem(item, remember: false) {
-                    // A switched-off item exists only in Spruce's list: forget it.
-                    if !item.isEnabled {
-                        forgetSavedLoginItem(item)
-                        succeeded.append(item.id)
-                    } else {
-                        failures.append(ItemFailure(itemID: item.id, title: item.name, reason: reason))
-                    }
+                if !item.isEnabled {
+                    // A switched-off item exists only in Spruce's list (System Events no longer
+                    // has it): forget it without touching login items that may share its path.
+                    forgetSavedLoginItem(item)
+                    succeeded.append(item.id)
+                } else if let reason = await removeLoginItem(item, remember: false) {
+                    failures.append(ItemFailure(itemID: item.id, title: item.name, reason: reason))
                 } else {
                     succeeded.append(item.id)
                 }
@@ -444,7 +449,7 @@ extension PerformanceEngine {
             let stopped = await stopForRemoval(launchItems)
             failures += stopped.failures
             let ready = launchItems.filter { stopped.succeeded.contains($0.id) }
-            let trashed = await trashPlists(ready)
+            let trashed = await trashPlists(ready, settings: settings)
             succeeded += trashed.succeeded
             failures += trashed.failures
         }
@@ -498,7 +503,8 @@ extension PerformanceEngine {
 
     /// Moves plists to the Trash via `FileRemover` (launch-item permission only). When a file
     /// can't be moved (owned by the system), the job is switched off so it stays stopped.
-    private func trashPlists(_ items: [PerformanceStartupItem]) async -> (succeeded: [String], failures: [ItemFailure]) {
+    private func trashPlists(_ items: [PerformanceStartupItem],
+                             settings: SpruceSettings) async -> (succeeded: [String], failures: [ItemFailure]) {
         guard !items.isEmpty else { return ([], []) }
         var byPath: [String: PerformanceStartupItem] = [:]
         var scanItems: [ScanItem] = []
@@ -511,7 +517,7 @@ extension PerformanceEngine {
             scanItems.append(scanItem)
         }
         let outcome = await FileRemover.shared.dispose(scanItems, module: .performance, options: .allowLaunchItems,
-                                                       settings: SettingsStore.shared.settings)
+                                                       settings: settings)
         var succeeded = outcome.removedItemIDs.compactMap { byPath[$0]?.id }
         var failures: [ItemFailure] = []
         var keepOff: [(item: PerformanceStartupItem, reason: String)] = []

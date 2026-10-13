@@ -177,26 +177,34 @@ public enum PerformanceLaunchServices {
     /// `.app` paths registered in `lsregister -dump` output. Lines look like
     /// `path:      /Applications/Foo.app (0x1a2b)`; the hex suffix is dropped.
     public static func registeredAppPaths(fromDump output: String) -> [String] {
-        var seen = Set<String>()
-        var out: [String] = []
-        for rawLine in output.split(separator: "\n", omittingEmptySubsequences: true) {
-            let line = rawLine.trimmingCharacters(in: .whitespaces)
-            guard line.hasPrefix("path:") else { continue }
-            var value = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
-            if let open = value.range(of: " (0x", options: .backwards), value.hasSuffix(")") {
-                value = String(value[..<open.lowerBound])
-            }
-            guard value.hasPrefix("/"), value.lowercased().hasSuffix(".app") else { continue }
-            if seen.insert(value).inserted { out.append(value) }
+        var reader = PerformanceLaunchServicesDumpReader()
+        reader.consume(Data(output.utf8))
+        reader.finish()
+        return reader.paths
+    }
+
+    /// The `.app` path on one dump line (`path: /Applications/Foo.app (0x1a2b)`), or nil.
+    public static func appPath(fromDumpLine rawLine: String) -> String? {
+        let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard line.hasPrefix("path:") else { return nil }
+        var value = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
+        if let open = value.range(of: " (0x", options: .backwards), value.hasSuffix(")") {
+            value = String(value[..<open.lowerBound])
         }
-        return out
+        guard value.hasPrefix("/"), value.lowercased().hasSuffix(".app") else { return nil }
+        return value
     }
 
     /// Registered apps whose bundle no longer exists, skipping disks that aren't connected
     /// and anything inside the read-only system volume.
     public static func stalePaths(fromDump output: String, fileExists: (String) -> Bool, limit: Int = 400) -> [String] {
+        stalePaths(from: registeredAppPaths(fromDump: output), fileExists: fileExists, limit: limit)
+    }
+
+    /// `stalePaths(fromDump:)` for paths already collected (e.g. by a streaming reader).
+    public static func stalePaths(from registered: [String], fileExists: (String) -> Bool, limit: Int = 400) -> [String] {
         var out: [String] = []
-        for path in registeredAppPaths(fromDump: output) {
+        for path in registered {
             if out.count >= limit { break }
             if path.hasPrefix("/System/") { continue }
             if fileExists(path) { continue }
@@ -204,6 +212,86 @@ public enum PerformanceLaunchServices {
             out.append(path)
         }
         return out
+    }
+}
+
+/// Reads `lsregister -dump` output as it arrives, in chunks of any size, and keeps only the
+/// registered `.app` paths, never the dump itself (it reaches hundreds of MB on Macs with
+/// many apps). Only lines starting with `path:` are decoded; a line too long to hold a
+/// path is skipped without being buffered.
+public struct PerformanceLaunchServicesDumpReader: Sendable {
+    /// Longer lines can't hold a valid path (PATH_MAX is 1,024 bytes) and are skipped.
+    public static let maxLineLength = 16 * 1024
+
+    /// Registered `.app` paths in the order they first appeared, without duplicates.
+    public private(set) var paths: [String] = []
+    /// Bytes read so far.
+    public private(set) var byteCount = 0
+    private var seen = Set<String>()
+    /// The start of a line split across chunks.
+    private var partial: [UInt8] = []
+    /// True while the rest of an overlong line is being skipped.
+    private var skippingLine = false
+
+    public init() {}
+
+    public mutating func consume(_ chunk: Data) {
+        guard !chunk.isEmpty else { return }
+        byteCount += chunk.count
+        chunk.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+            consume(bytes: raw)
+        }
+    }
+
+    /// Reads the last line when the output doesn't end with a newline.
+    public mutating func finish() {
+        if !skippingLine, !partial.isEmpty,
+           let path = partial.withUnsafeBytes({ Self.appPath(in: $0) }) {
+            record(path)
+        }
+        partial.removeAll()
+        skippingLine = false
+    }
+
+    private mutating func consume(bytes raw: UnsafeRawBufferPointer) {
+        var start = raw.startIndex
+        let end = raw.endIndex
+        while start < end {
+            let newline = raw[start..<end].firstIndex(of: 0x0A)
+            let piece = UnsafeRawBufferPointer(rebasing: raw[start..<(newline ?? end)])
+            if !skippingLine {
+                if partial.isEmpty && newline != nil {
+                    // The whole line is in this chunk: read it in place.
+                    if piece.count <= Self.maxLineLength, let path = Self.appPath(in: piece) { record(path) }
+                } else if partial.count + piece.count > Self.maxLineLength {
+                    partial.removeAll(keepingCapacity: true)
+                    skippingLine = true
+                } else {
+                    partial.append(contentsOf: piece)
+                    if newline != nil {
+                        if let path = partial.withUnsafeBytes({ Self.appPath(in: $0) }) { record(path) }
+                        partial.removeAll(keepingCapacity: true)
+                    }
+                }
+            }
+            guard let newline else { return }
+            skippingLine = false
+            start = newline + 1
+        }
+    }
+
+    private mutating func record(_ path: String) {
+        if seen.insert(path).inserted { paths.append(path) }
+    }
+
+    /// The `.app` path on one line, decoding it only when it starts with `path:`.
+    static func appPath(in line: UnsafeRawBufferPointer) -> String? {
+        var i = 0
+        while i < line.count && (line[i] == 0x20 || line[i] == 0x09) { i += 1 }
+        let prefix: [UInt8] = [0x70, 0x61, 0x74, 0x68, 0x3A] // "path:"
+        guard line.count - i >= prefix.count else { return nil }
+        for k in 0..<prefix.count where line[i + k] != prefix[k] { return nil }
+        return PerformanceLaunchServices.appPath(fromDumpLine: String(decoding: line, as: UTF8.self))
     }
 }
 

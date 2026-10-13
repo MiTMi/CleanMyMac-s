@@ -732,6 +732,42 @@ public enum PerformanceStartupGrouping {
     }
 }
 
+// MARK: - Ignore list
+
+/// Startup items covered by the ignore list (`SpruceSettings`) are never listed,
+/// switched or removed.
+public enum PerformanceStartupIgnore {
+    /// True when the item's id or plist, its app's bundle id or its launchd label, or its
+    /// plist, program or app (or a folder holding one of them) is on the ignore list.
+    public static func isIgnored(_ item: PerformanceStartupItem, settings: SpruceSettings) -> Bool {
+        if !settings.ignoredItemIDs.isEmpty {
+            let ids = Set(settings.ignoredItemIDs)
+            if ids.contains(item.id) { return true }
+            if let plist = item.plistPath, ids.contains(plist) { return true }
+        }
+        if !settings.ignoredBundleIDs.isEmpty {
+            let own = [item.appBundleID, item.label].compactMap { $0?.lowercased() }.filter { !$0.isEmpty }
+            if settings.ignoredBundleIDs.contains(where: { own.contains($0.lowercased()) }) { return true }
+        }
+        guard !settings.ignoredPaths.isEmpty else { return false }
+        return [item.plistPath, item.executablePath, item.appPath].contains { path in
+            guard let path, path.hasPrefix("/") else { return false }
+            return settings.isIgnored(path: path)
+        }
+    }
+
+    /// The items the ignore list doesn't cover, in their original order.
+    public static func filtered(_ items: [PerformanceStartupItem], settings: SpruceSettings) -> [PerformanceStartupItem] {
+        guard !settings.ignoredItemIDs.isEmpty || !settings.ignoredBundleIDs.isEmpty || !settings.ignoredPaths.isEmpty else {
+            return items
+        }
+        return items.filter { !isIgnored($0, settings: settings) }
+    }
+
+    /// Shown when an item reaches an action after it was added to the ignore list.
+    public static let refusalReason = "It's on your ignore list, so Spruce leaves it alone."
+}
+
 // MARK: - Classic login items (System Events)
 
 public struct PerformanceLegacyLoginItem: Codable, Hashable, Sendable {
@@ -775,8 +811,30 @@ public enum PerformanceAppleScript {
     return out
     """
 
-    public static func deleteLoginItemSource(name: String) -> String {
-        "tell application \"System Events\" to delete (every login item whose name is \(quote(name)))"
+    /// Deletes the login item that opens `path`. Two items can share a display name, so
+    /// the name is used only for an item System Events reports without a path, and then
+    /// only items that have no path either are deleted.
+    public static func deleteLoginItemSource(name: String, path: String) -> String {
+        if !path.isEmpty {
+            return "tell application \"System Events\" to delete (every login item whose path is \(quote(path)))"
+        }
+        // Walk backwards by index so deleting one doesn't shift the ones still to check.
+        return """
+        tell application "System Events"
+            repeat with i from (count of login items) to 1 by -1
+                set p to ""
+                try
+                    set p to (path of login item i) as text
+                end try
+                if p is "missing value" then set p to ""
+                set n to ""
+                try
+                    set n to name of login item i
+                end try
+                if p is "" and n is \(quote(name)) then delete login item i
+            end repeat
+        end tell
+        """
     }
 
     public static func addLoginItemSource(path: String, hidden: Bool) -> String {

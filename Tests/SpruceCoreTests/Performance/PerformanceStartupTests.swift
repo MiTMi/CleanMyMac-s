@@ -291,7 +291,7 @@ final class PerformanceAppleScriptTests: XCTestCase {
     func testQuoting() {
         XCTAssertEqual(PerformanceAppleScript.quote("Plain"), "\"Plain\"")
         XCTAssertEqual(PerformanceAppleScript.quote("Say \"hi\" \\ bye"), "\"Say \\\"hi\\\" \\\\ bye\"")
-        XCTAssertTrue(PerformanceAppleScript.deleteLoginItemSource(name: "A \"B\"").contains("\"A \\\"B\\\"\""))
+        XCTAssertTrue(PerformanceAppleScript.deleteLoginItemSource(name: "A \"B\"", path: "").contains("\"A \\\"B\\\"\""))
         XCTAssertTrue(PerformanceAppleScript.addLoginItemSource(path: "/Applications/A.app", hidden: true).contains("hidden:true"))
     }
 
@@ -306,9 +306,67 @@ final class PerformanceAppleScriptTests: XCTestCase {
         XCTAssertTrue(PerformanceAppleScript.parseLoginItems("").isEmpty)
     }
 
+    func testDeletesLoginItemsByPathNotName() {
+        let byPath = PerformanceAppleScript.deleteLoginItemSource(name: "Helper", path: "/Applications/A \"B\".app")
+        XCTAssertTrue(byPath.contains("whose path is \"/Applications/A \\\"B\\\".app\""))
+        XCTAssertFalse(byPath.contains("name"), "two items can share a name: a known path decides alone")
+
+        let byName = PerformanceAppleScript.deleteLoginItemSource(name: "Helper", path: "")
+        XCTAssertTrue(byName.contains("n is \"Helper\""))
+        XCTAssertTrue(byName.contains("p is \"\" and"), "without a path, only items without a path may go")
+        XCTAssertFalse(byName.contains("every login item whose name"))
+    }
+
     func testSavedLoginItemsRoundTrip() throws {
         let items = [PerformanceLegacyLoginItem(name: "A", path: "/Applications/A.app", hidden: false)]
         let data = try JSONEncoder().encode(items)
         XCTAssertEqual(try JSONDecoder().decode([PerformanceLegacyLoginItem].self, from: data), items)
+    }
+}
+
+final class PerformanceStartupIgnoreTests: XCTestCase {
+    private func agent(_ name: String, plist: String, label: String? = nil, executable: String? = nil,
+                       app: String? = nil, bundleID: String? = nil) -> PerformanceStartupItem {
+        PerformanceStartupItem(id: plist, kind: .userAgent, name: name, label: label, plistPath: plist,
+                               executablePath: executable, vendorKey: "v", vendorName: "V", appPath: app,
+                               appBundleID: bundleID, isEnabled: true)
+    }
+
+    func testNothingIgnoredKeepsEverything() {
+        let items = [agent("a", plist: "/Users/t/Library/LaunchAgents/a.plist")]
+        XCTAssertEqual(PerformanceStartupIgnore.filtered(items, settings: SpruceSettings()), items)
+    }
+
+    func testMatchesPathsBundleIDsLabelsAndItemIDs() {
+        let home = NSHomeDirectory()
+        let byPlistFolder = agent("folder", plist: home + "/Library/LaunchAgents/x.plist")
+        let byExecutable = agent("exe", plist: "/Library/LaunchAgents/e.plist", executable: "/opt/tool/bin/run")
+        let byApp = agent("app", plist: "/Library/LaunchAgents/p.plist", app: "/Applications/Kept.app")
+        let byBundle = agent("bundle", plist: "/Library/LaunchAgents/b.plist", bundleID: "com.Example.App")
+        let byLabel = agent("label", plist: "/Library/LaunchAgents/l.plist", label: "com.example.helper")
+        let byID = agent("id", plist: "/Library/LaunchAgents/i.plist")
+        let login = PerformanceStartupItem(id: "login:/Applications/Login.app", kind: .loginItem, name: "Login",
+                                           executablePath: "/Applications/Login.app", vendorKey: "l", vendorName: "L",
+                                           isEnabled: true)
+        let free = agent("free", plist: "/Library/LaunchAgents/f.plist", label: "com.free.agent",
+                         executable: "/usr/local/bin/free", app: "/Applications/Free.app", bundleID: "com.free.app")
+
+        var settings = SpruceSettings()
+        settings.ignoredPaths = ["~/Library/LaunchAgents", "/opt/tool", "/Applications/Kept.app", "/Applications/Login.app"]
+        settings.ignoredBundleIDs = ["com.example.app", "COM.EXAMPLE.HELPER"]
+        settings.ignoredItemIDs = ["/Library/LaunchAgents/i.plist"]
+
+        let all = [byPlistFolder, byExecutable, byApp, byBundle, byLabel, byID, login, free]
+        for item in all where item != free {
+            XCTAssertTrue(PerformanceStartupIgnore.isIgnored(item, settings: settings), item.name)
+        }
+        XCTAssertEqual(PerformanceStartupIgnore.filtered(all, settings: settings), [free])
+    }
+
+    func testRelativeProgramPathsNeverMatch() {
+        var settings = SpruceSettings()
+        settings.ignoredPaths = ["/usr/bin"]
+        let item = agent("rel", plist: "/Library/LaunchAgents/r.plist", executable: "bin/tool")
+        XCTAssertFalse(PerformanceStartupIgnore.isIgnored(item, settings: settings))
     }
 }

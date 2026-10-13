@@ -42,12 +42,15 @@ public struct PerformanceDiskReading: Sendable, Equatable {
 public enum PerformanceSystemProbe {
     // MARK: Memory
 
+    /// `mach_host_self()` adds a reference to the host port on every call, so it's taken once.
+    private static let hostPort: mach_port_t = mach_host_self()
+
     public static func memory() -> PerformanceMemoryReading? {
         var stats = vm_statistics64_data_t()
         var count = mach_msg_type_number_t(MemoryLayout<vm_statistics64_data_t>.size / MemoryLayout<integer_t>.size)
         let result = withUnsafeMutablePointer(to: &stats) { pointer -> kern_return_t in
             pointer.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { rebound in
-                host_statistics64(mach_host_self(), HOST_VM_INFO64, rebound, &count)
+                host_statistics64(Self.hostPort, HOST_VM_INFO64, rebound, &count)
             }
         }
         guard result == KERN_SUCCESS else { return nil }
