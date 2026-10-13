@@ -52,11 +52,31 @@ struct SpaceMapResultsScreen: View {
             mapCaption(result: result, focus: focus)
                 .padding(Spacing.m)
                 .allowsHitTesting(false)
+            // A collapsed folder (small, many items) is loaded when it is opened.
+            if focus.isCollapsed, screen.isLoading(focus) {
+                loadingBadge(focus)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(RoundedRectangle(cornerRadius: Radius.panel, style: .continuous).fill(Color.black.opacity(0.14)))
         .overlay(RoundedRectangle(cornerRadius: Radius.panel, style: .continuous).strokeBorder(Ink.hairline))
         .clipShape(RoundedRectangle(cornerRadius: Radius.panel, style: .continuous))
+    }
+
+    private func loadingBadge(_ focus: SpaceMapNode) -> some View {
+        HStack(spacing: Spacing.s) {
+            ProgressView()
+                .controlSize(.small)
+            Text("Loading \(CountFormat.items(focus.itemCount))…")
+                .font(SpruceFont.callout)
+                .foregroundStyle(Ink.secondary)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .background(Capsule().fill(Color.black.opacity(0.3)))
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .allowsHitTesting(false)
+        .transition(.opacity)
     }
 
     private func mapCaption(result: SpaceMapScanResult, focus: SpaceMapNode) -> some View {

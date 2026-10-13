@@ -144,6 +144,10 @@ final class SpaceMapSunburstTests: XCTestCase {
         let folded = segments.first { $0.node == nil }
         XCTAssertEqual(folded?.foldedCount, 20)
         XCTAssertEqual(folded?.bytes, 2000)
+        // The folded arc names exactly the children it stands for (for its hover card).
+        XCTAssertEqual(folded?.folded.count, 20)
+        XCTAssertEqual(Set(folded?.folded.map(\.name) ?? []), Set((0..<20).map { "t\($0)" }))
+        XCTAssertTrue(segments.filter { $0.node != nil }.allSatisfy { $0.folded.isEmpty })
     }
 
     func testAnglesAndHitTest() throws {

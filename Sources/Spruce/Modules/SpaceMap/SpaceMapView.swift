@@ -15,7 +15,8 @@ struct SpaceMapView: View {
 }
 
 /// Hosts the Space Map journey (location → scanning → map → Trash → done), routes the
-/// `spaceMap` tool id and owns the removal confirmation and Quick Look.
+/// `spaceMap` tool id, maps folders handed over from Finder, and owns the removal
+/// confirmation and Quick Look.
 struct SpaceMapRootScreen: View {
     @Environment(AppModel.self) private var model
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -36,8 +37,10 @@ struct SpaceMapRootScreen: View {
         .onAppear {
             screen.refreshTargets()
             consumePendingTool()
+            consumePendingFiles()
         }
         .onChange(of: model.pendingTool) { _, _ in consumePendingTool() }
+        .onChange(of: model.pendingFiles) { _, _ in consumePendingFiles() }
         .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didMountNotification)) { _ in
             screen.refreshTargets()
         }
@@ -95,5 +98,18 @@ struct SpaceMapRootScreen: View {
         guard model.pendingTool == "spaceMap" else { return }
         model.pendingTool = nil
         screen.openFromTool()
+        // A folder that came with the navigation is mapped once the tool is open.
+        consumePendingFiles()
+    }
+
+    /// A folder from Finder ("Map Folder with Spruce", the Dock icon, Open With) becomes the
+    /// root of the map (a file maps its enclosing folder). Mapping never removes anything.
+    private func consumePendingFiles() {
+        guard model.selection == .spaceMap, let first = model.pendingFiles.first else { return }
+        model.pendingFiles = []
+        var isDirectory: ObjCBool = false
+        let exists = FileManager.default.fileExists(atPath: first.path, isDirectory: &isDirectory)
+        guard exists else { return }
+        screen.mapFolder(isDirectory.boolValue ? first : first.deletingLastPathComponent())
     }
 }

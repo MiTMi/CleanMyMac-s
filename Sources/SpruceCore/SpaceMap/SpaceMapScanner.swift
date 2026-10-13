@@ -40,16 +40,65 @@ public struct SpaceMapBoundary: Sendable, Equatable {
 }
 
 /// Keeps the tree small: the largest files of a folder become nodes, the long tail of
-/// small files is folded into one `smallFiles` node per folder.
+/// small files is folded into one `smallFiles` node per folder, and (when
+/// `collapseBelowBytes` is set) small sub-folders with many items keep only their totals.
+///
+/// A map of a whole startup disk otherwise holds a node for nearly every folder and file
+/// (millions of them, gigabytes of memory). Collapsed folders (`SpaceMapNode.isCollapsed`)
+/// are measured exactly but their contents are dropped as soon as they are finished; the
+/// app loads them again with a quick rescan when the user opens one.
 public struct SpaceMapFoldPolicy: Sendable, Equatable {
     /// Files of one folder kept as individual nodes.
     public var maxFilesPerFolder: Int
     /// Files at least this big are always kept, whatever their rank.
     public var alwaysKeepBytes: Int64
+    /// Sub-folders whose whole subtree is smaller than this are collapsed (0 = never). The
+    /// scan root is never collapsed.
+    public var collapseBelowBytes: Int64
+    /// Only folders holding at least this many files and folders are collapsed; smaller
+    /// ones cost less memory than loading them again would save.
+    public var collapseMinItems: Int
 
-    public init(maxFilesPerFolder: Int = 60, alwaysKeepBytes: Int64 = 10_000_000) {
+    public init(maxFilesPerFolder: Int = 60, alwaysKeepBytes: Int64 = 10_000_000,
+                collapseBelowBytes: Int64 = 0, collapseMinItems: Int = 40) {
         self.maxFilesPerFolder = max(1, maxFilesPerFolder)
         self.alwaysKeepBytes = alwaysKeepBytes
+        self.collapseBelowBytes = max(0, collapseBelowBytes)
+        self.collapseMinItems = max(1, collapseMinItems)
+    }
+
+    /// Whether a finished folder (not the scan root) keeps only its totals.
+    public func shouldCollapse(_ node: SpaceMapNode) -> Bool {
+        collapseBelowBytes > 0 && node.isFolder && !node.children.isEmpty
+            && node.size < collapseBelowBytes && node.itemCount >= collapseMinItems
+    }
+
+    /// Collapses the sub-folders of `root` that a scan with this policy would have
+    /// collapsed (`root` itself is kept). For a folder loaded in full that turned out to
+    /// have grown past the threshold since the scan. Returns how many were collapsed.
+    @discardableResult
+    public func collapseDescendants(of root: SpaceMapNode) -> Int {
+        guard collapseBelowBytes > 0 else { return 0 }
+        var collapsed = 0
+        var stack = root.children.filter(\.isFolder)
+        while let node = stack.popLast() {
+            if shouldCollapse(node) {
+                _ = node.collapse()
+                collapsed += 1
+            } else {
+                stack.append(contentsOf: node.children.filter(\.isFolder))
+            }
+        }
+        return collapsed
+    }
+
+    /// Collapse threshold for a location on a volume with `volumeUsed` bytes in use:
+    /// 0.01 % of it, between 4 MB and 256 MB (16 MB when the usage is unknown). Folders
+    /// that small never show up on a map of the whole volume, and loading one takes
+    /// milliseconds.
+    public static func collapseThreshold(volumeUsed: Int64?) -> Int64 {
+        guard let used = volumeUsed, used > 0 else { return 16_000_000 }
+        return min(256_000_000, max(4_000_000, used / 10_000))
     }
 }
 
@@ -72,6 +121,19 @@ public struct SpaceMapScanOptions: Sendable, Equatable {
         self.includeHidden = includeHidden
         self.expectedBytes = expectedBytes
         self.rootName = rootName
+    }
+
+    /// Options for measuring `node` of an existing map again: the same boundary and
+    /// folding, the node's name, and its last size as the expected total. `inFull` (opening
+    /// a collapsed folder) turns collapsing off: the folder was below the threshold, so its
+    /// whole subtree is small (if it grew since, apply `fold.collapseDescendants(of:)` to
+    /// the result). Read `node` on the actor that owns the tree.
+    public func rescanning(_ node: SpaceMapNode, inFull: Bool = false) -> SpaceMapScanOptions {
+        var copy = self
+        copy.rootName = node.name
+        copy.expectedBytes = node.size > 0 ? node.size : nil
+        if inFull { copy.fold.collapseBelowBytes = 0 }
+        return copy
     }
 }
 
@@ -307,8 +369,10 @@ final class SpaceMapScanJob: @unchecked Sendable {
             stats.bytes += listing.bytes
             if job.node.isUnreadable { stats.unreadableFolders += 1 }
             stats.currentPath = job.path
+            // Contents of collapsed folders, released after the lock is given up.
+            var dropped: [[SpaceMapNode]] = []
             if listing.subdirectories.isEmpty {
-                complete(job.node)
+                complete(job.node, dropped: &dropped)
             } else {
                 job.node.scanPending = listing.subdirectories.count
                 stack.append(contentsOf: listing.subdirectories.reversed())
@@ -316,12 +380,14 @@ final class SpaceMapScanJob: @unchecked Sendable {
             }
             let report = takeReportIfDue()
             condition.unlock()
+            dropped.removeAll()
             if let report { progress?(report) }
         }
     }
 
-    /// Lock held. Finalises a folder whose sub-folders are all done, then its ancestors.
-    private func complete(_ node: SpaceMapNode) {
+    /// Lock held. Finalises a folder whose sub-folders are all done, then its ancestors;
+    /// small folders with many items are collapsed as soon as they are final.
+    private func complete(_ node: SpaceMapNode, dropped: inout [[SpaceMapNode]]) {
         var current: SpaceMapNode? = node
         while let folder = current {
             folder.finalizeAggregates()
@@ -329,6 +395,9 @@ final class SpaceMapScanJob: @unchecked Sendable {
                 finished = true
                 condition.broadcast()
                 return
+            }
+            if options.fold.shouldCollapse(folder) {
+                dropped.append(folder.collapse())
             }
             guard let parent = folder.parent else { return }
             parent.scanPending -= 1

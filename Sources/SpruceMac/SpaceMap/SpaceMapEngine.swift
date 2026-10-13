@@ -15,6 +15,12 @@ import SpruceCore
 ///   `/Users` are counted once. Other volumes and mount points are never entered.
 /// * For whole-volume scans the space no readable file accounts for becomes the
 ///   "System & snapshots" pseudo-node (used − scanned).
+/// * Small folders with many items are collapsed (`SpaceMapNode.isCollapsed`, threshold
+///   from `SpaceMapFoldPolicy.collapseThreshold`), so a map of a whole disk doesn't hold a
+///   node for each of its millions of files and folders; `rescan(path:options:)` with
+///   `options.rescanning(node, inFull: true)` loads one when it is opened.
+/// * Target discovery reads volume capacities (slow for purgeable space and network
+///   shares): call `availableTargets` and `target(forFolder:)` off the main thread.
 /// * Removal goes through `FileRemover.dispose`, always to the Trash, after `PathGuard`
 ///   and an inode check that the item is still what was scanned.
 public final class SpaceMapEngine: @unchecked Sendable {
@@ -41,7 +47,8 @@ public final class SpaceMapEngine: @unchecked Sendable {
 
     // MARK: Targets
 
-    /// The startup disk, the home folder and every other mounted, browsable volume.
+    /// The startup disk, the home folder and every other mounted, browsable volume. Blocks
+    /// on volume queries: never call it on the main thread.
     public func availableTargets() -> [SpaceMapTarget] {
         let startupVolume = SpaceMapVolumes.info(for: URL(fileURLWithPath: "/"))
         let home = NSHomeDirectory()
@@ -55,7 +62,22 @@ public final class SpaceMapEngine: @unchecked Sendable {
         return targets
     }
 
-    /// A target for a folder the user picked (standard locations keep their names).
+    /// `availableTargets()` plus a folder the user picked earlier, refreshed, when it still
+    /// exists (`custom` is nil in the result when it is gone). Blocks: call it off the main
+    /// thread.
+    public func availableTargets(keeping custom: SpaceMapTarget?) -> SpaceMapLocations {
+        var list = availableTargets()
+        guard let custom, exists(custom) else { return SpaceMapLocations(targets: list, custom: nil) }
+        if let known = list.first(where: { $0.path == custom.path }) {
+            return SpaceMapLocations(targets: list, custom: known)
+        }
+        let refreshedCustom = refreshed(custom)
+        list.append(refreshedCustom)
+        return SpaceMapLocations(targets: list, custom: refreshedCustom)
+    }
+
+    /// A target for a folder the user picked (standard locations keep their names). Blocks
+    /// on volume queries: call it off the main thread.
     public func target(forFolder url: URL) -> SpaceMapTarget {
         let path = SpaceMapScanner.standardize(url.resolvingSymlinksInPath().path)
         if let known = availableTargets().first(where: { $0.path == path }) { return known }
@@ -106,15 +128,23 @@ public final class SpaceMapEngine: @unchecked Sendable {
     /// Rescans one folder of an existing map with the same boundary. Returns the fresh
     /// subtree (pass it to `SpaceMapNode.replaceContents(with:)` on the owning actor), or
     /// nil when the folder no longer exists (then detach the node).
+    ///
+    /// Prefer `rescan(path:options:)` with values read on the actor that owns the tree;
+    /// this variant reads `node` on the calling task.
     public func rescan(_ node: SpaceMapNode, options: SpaceMapScanOptions,
                        progress: SpaceMapStatsHandler? = nil) async throws -> SpaceMapNode? {
         guard node.isReal else { return nil }
-        let path = node.path
+        return try await rescan(path: node.path, options: options.rescanning(node), progress: progress)
+    }
+
+    /// Measures the folder at `path` again for an existing map. `options` should come from
+    /// `result.options.rescanning(node)` (same boundary and folding), or
+    /// `rescanning(node, inFull: true)` to open a collapsed folder. Returns nil when the
+    /// folder is gone.
+    public func rescan(path: String, options: SpaceMapScanOptions,
+                       progress: SpaceMapStatsHandler? = nil) async throws -> SpaceMapNode? {
         guard FileWalker.entry(at: path) != nil else { return nil }
-        var subtree = options
-        subtree.rootName = node.name
-        subtree.expectedBytes = node.size > 0 ? node.size : nil
-        let output = try await SpaceMapScanner.scan(path: path, options: subtree, executor: Self.executor,
+        let output = try await SpaceMapScanner.scan(path: path, options: options, executor: Self.executor,
                                                     progress: progress)
         return output.root
     }
@@ -142,7 +172,10 @@ public final class SpaceMapEngine: @unchecked Sendable {
         } else {
             workers = 6
         }
-        return SpaceMapScanOptions(boundary: boundary, fold: SpaceMapFoldPolicy(), workers: workers,
+        // Small folders with many items keep only their totals until they are opened, so a
+        // map of a whole disk holds a small fraction of its folders and files as nodes.
+        let fold = SpaceMapFoldPolicy(collapseBelowBytes: SpaceMapFoldPolicy.collapseThreshold(volumeUsed: target.volume?.used))
+        return SpaceMapScanOptions(boundary: boundary, fold: fold, workers: workers,
                                    includeHidden: true,
                                    expectedBytes: target.coversWholeVolume ? target.volume?.used : nil,
                                    rootName: target.title)
@@ -194,6 +227,19 @@ public final class SpaceMapEngine: @unchecked Sendable {
                 _ = setiopolicy_np(SpaceMapEngine.iopolTypeMaterialize, SpaceMapEngine.iopolScopeThread, previous)
             }
         }
+    }
+}
+
+/// What `SpaceMapEngine.availableTargets(keeping:)` found.
+public struct SpaceMapLocations: Sendable {
+    public var targets: [SpaceMapTarget]
+    /// The picked folder with fresh figures (or the standard location at its path); nil
+    /// when it no longer exists.
+    public var custom: SpaceMapTarget?
+
+    public init(targets: [SpaceMapTarget], custom: SpaceMapTarget?) {
+        self.targets = targets
+        self.custom = custom
     }
 }
 

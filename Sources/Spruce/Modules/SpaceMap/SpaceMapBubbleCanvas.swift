@@ -45,13 +45,15 @@ struct SpaceMapViewTransform {
 /// The interactive bubble map of the focused folder, drawn in a `Canvas`: largest bubble
 /// in the middle, area ∝ bytes, colours by type and rank, labels on big bubbles, a packed
 /// preview of each big folder's contents, hover card, click a folder to zoom in (the
-/// bubble grows to fill the view), click empty space to zoom out.
+/// bubble grows to fill the view), click empty space to zoom out. The pointer position
+/// lives in `SpaceMapPointer` (read by the hover card only), so moving the mouse redraws
+/// the map only when the bubble under it changes.
 struct SpaceMapBubbleCanvas: View {
     let screen: SpaceMapScreenModel
     let focus: SpaceMapNode
 
     @State private var transition: SpaceMapZoomTransition?
-    @State private var hoverPoint: CGPoint?
+    @State private var pointer = SpaceMapPointer()
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private static let badgeRadius: CGFloat = 9
@@ -60,10 +62,11 @@ struct SpaceMapBubbleCanvas: View {
         GeometryReader { geo in
             let size = geo.size
             let map = screen.bubbleMap(for: focus, width: Double(size.width), height: Double(size.height))
+            let state = SpaceMapDrawState(screen)
             ZStack(alignment: .topLeading) {
                 TimelineView(.animation(minimumInterval: nil, paused: transition == nil)) { timeline in
                     Canvas { context, _ in
-                        render(map, size: size, now: timeline.date, context: &context)
+                        render(map, size: size, now: timeline.date, state: state, context: &context)
                     }
                 }
                 .contentShape(Rectangle())
@@ -80,7 +83,9 @@ struct SpaceMapBubbleCanvas: View {
                         Button("Enclosing Folder") { screen.zoomOut() }
                     }
                 }
-                hoverCard(map: map, size: size)
+                SpaceMapPointerCard(pointer: pointer, screen: screen,
+                                    subject: transition == nil ? hoverSubject(map: map) : nil,
+                                    total: focus.size, bounds: size)
             }
             .onChange(of: focus) { oldFocus, newFocus in
                 startTransition(from: oldFocus, to: newFocus, size: size)
@@ -98,16 +103,6 @@ struct SpaceMapBubbleCanvas: View {
 
     // MARK: Hover card
 
-    @ViewBuilder
-    private func hoverCard(map: SpaceMapBubbleMap, size: CGSize) -> some View {
-        if transition == nil, let point = hoverPoint, let subject = hoverSubject(map: map) {
-            let origin = SpaceMapHoverCard.origin(near: point, in: size)
-            SpaceMapHoverCard(screen: screen, subject: subject, total: focus.size)
-                .offset(x: origin.x, y: origin.y)
-                .transition(.opacity)
-        }
-    }
-
     private func hoverSubject(map: SpaceMapBubbleMap) -> SpaceMapHoverSubject? {
         if screen.hoveringSmaller, let bubble = map.bubbles.last, case .smaller(let group) = bubble.content {
             return .smaller(group)
@@ -123,7 +118,7 @@ struct SpaceMapBubbleCanvas: View {
     private func handleHover(_ phase: HoverPhase, map: SpaceMapBubbleMap) {
         switch phase {
         case .active(let location):
-            hoverPoint = location
+            pointer.location = location
             guard transition == nil else { return }
             let bubble = map.bubble(atX: Double(location.x), y: Double(location.y))
             switch bubble?.content {
@@ -138,7 +133,7 @@ struct SpaceMapBubbleCanvas: View {
                 if screen.hoveringSmaller { screen.hoveringSmaller = false }
             }
         case .ended:
-            hoverPoint = nil
+            pointer.location = nil
             if screen.hovered != nil { screen.hovered = nil }
             if screen.hoveringSmaller { screen.hoveringSmaller = false }
         }
@@ -205,9 +200,10 @@ struct SpaceMapBubbleCanvas: View {
 
     // MARK: Rendering
 
-    private func render(_ map: SpaceMapBubbleMap, size: CGSize, now: Date, context: inout GraphicsContext) {
+    private func render(_ map: SpaceMapBubbleMap, size: CGSize, now: Date, state: SpaceMapDrawState,
+                        context: inout GraphicsContext) {
         guard let transition, let progress = transition.progress(at: now) else {
-            draw(map, transform: .identity, alpha: 1, labelAlpha: 1, interactive: true, context: &context)
+            draw(map, transform: .identity, alpha: 1, labelAlpha: 1, interactive: true, state: state, context: &context)
             return
         }
         switch transition.kind {
@@ -222,17 +218,19 @@ struct SpaceMapBubbleCanvas: View {
             let parentTransform = SpaceMapViewTransform(anchor: p, target: moving, scale: scale)
             let childTransform = SpaceMapViewTransform(anchor: center, target: moving, scale: scale * CGFloat(pivot.r) / fittedRadius)
             draw(parent, transform: parentTransform, alpha: Double(1 - t), labelAlpha: Double(max(0, 1 - 3 * t)),
-                 interactive: false, context: &context)
+                 interactive: false, state: state, context: &context)
             draw(child, transform: childTransform, alpha: Double(min(1, t * 1.4)), labelAlpha: Double(max(0, 3 * t - 2)),
-                 interactive: false, context: &context)
+                 interactive: false, state: state, context: &context)
         case let .fade(from, to):
-            draw(from, transform: .identity, alpha: 1 - progress, labelAlpha: 1 - progress, interactive: false, context: &context)
-            draw(to, transform: .identity, alpha: progress, labelAlpha: progress, interactive: false, context: &context)
+            draw(from, transform: .identity, alpha: 1 - progress, labelAlpha: 1 - progress, interactive: false,
+                 state: state, context: &context)
+            draw(to, transform: .identity, alpha: progress, labelAlpha: progress, interactive: false,
+                 state: state, context: &context)
         }
     }
 
     private func draw(_ map: SpaceMapBubbleMap, transform: SpaceMapViewTransform, alpha: Double, labelAlpha: Double,
-                      interactive: Bool, context: inout GraphicsContext) {
+                      interactive: Bool, state: SpaceMapDrawState, context: inout GraphicsContext) {
         guard alpha > 0.01 else { return }
         for bubble in map.bubbles {
             let (center, radius) = transform.apply(bubble.circle)
@@ -242,23 +240,23 @@ struct SpaceMapBubbleCanvas: View {
             switch bubble.content {
             case .node(let node):
                 drawNode(node, bubble: bubble, center: center, radius: radius, transform: transform, alpha: alpha,
-                         labelAlpha: labelAlpha, interactive: interactive, context: &context)
+                         labelAlpha: labelAlpha, interactive: interactive, state: state, context: &context)
             case .smaller(let group):
                 drawSmaller(group, center: center, radius: radius, alpha: alpha, labelAlpha: labelAlpha,
-                            interactive: interactive, context: &context)
+                            interactive: interactive, state: state, context: &context)
             }
         }
     }
 
     private func drawNode(_ node: SpaceMapNode, bubble: SpaceMapBubble, center: CGPoint, radius: CGFloat,
                           transform: SpaceMapViewTransform, alpha: Double, labelAlpha: Double, interactive: Bool,
-                          context: inout GraphicsContext) {
+                          state: SpaceMapDrawState, context: inout GraphicsContext) {
         let rect = CGRect(x: center.x - radius, y: center.y - radius, width: radius * 2, height: radius * 2)
         let path = Path(ellipseIn: rect)
         let base = SpaceMapStyle.color(for: node, rank: bubble.rank)
-        let hovered = interactive && screen.hovered === node
+        let hovered = interactive && state.hovered === node
         let selected = interactive && (screen.isSelected(node) || screen.isCovered(node))
-        let highlighted = interactive && screen.highlighted === node
+        let highlighted = interactive && state.highlighted === node
 
         if node.kind == .system {
             context.fill(path, with: .color(SpaceMapStyle.system.opacity(0.6 * alpha)))
@@ -319,14 +317,15 @@ struct SpaceMapBubbleCanvas: View {
     }
 
     private func drawSmaller(_ group: SpaceMapSmallerGroup, center: CGPoint, radius: CGFloat, alpha: Double,
-                             labelAlpha: Double, interactive: Bool, context: inout GraphicsContext) {
+                             labelAlpha: Double, interactive: Bool, state: SpaceMapDrawState,
+                             context: inout GraphicsContext) {
         let rect = CGRect(x: center.x - radius, y: center.y - radius, width: radius * 2, height: radius * 2)
         let path = Path(ellipseIn: rect)
-        let hovered = interactive && screen.hoveringSmaller
+        let hovered = interactive && state.hoveringSmaller
         context.fill(path, with: .color(Color.white.opacity((hovered ? 0.16 : 0.08) * alpha)))
         context.stroke(path, with: .color(Color.white.opacity((hovered ? 0.7 : 0.4) * alpha)),
                        style: StrokeStyle(lineWidth: 1.2, dash: [4, 4]))
-        if interactive && screen.showsSmallerItems {
+        if interactive && state.showsSmallerItems {
             context.stroke(Path(ellipseIn: rect.insetBy(dx: -4, dy: -4)),
                            with: .color(ModuleID.spaceMap.palette.accentText.opacity(alpha)), lineWidth: 2)
         }

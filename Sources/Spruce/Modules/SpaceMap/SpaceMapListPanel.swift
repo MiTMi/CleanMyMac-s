@@ -57,13 +57,35 @@ struct SpaceMapListPanel: View {
     private var emptyFolder: some View {
         VStack(spacing: Spacing.s) {
             Spacer()
-            Image(systemName: focus.isUnreadable ? "lock.fill" : "tray")
-                .font(.system(size: 26, weight: .light))
-                .foregroundStyle(Ink.tertiary)
-            Text(focus.isUnreadable ? "Spruce couldn't read this folder" : "This folder is empty")
-                .font(SpruceFont.callout)
-                .foregroundStyle(Ink.secondary)
-                .multilineTextAlignment(.center)
+            if focus.isCollapsed {
+                // Measured during the scan, contents loaded now (see SpaceMapFoldPolicy).
+                if screen.isLoading(focus) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Loading \(CountFormat.items(focus.itemCount))…")
+                        .font(SpruceFont.callout)
+                        .foregroundStyle(Ink.secondary)
+                } else {
+                    Image(systemName: "exclamationmark.triangle")
+                        .font(.system(size: 24, weight: .light))
+                        .foregroundStyle(Ink.tertiary)
+                    Text("Spruce couldn't list this folder")
+                        .font(SpruceFont.callout)
+                        .foregroundStyle(Ink.secondary)
+                        .multilineTextAlignment(.center)
+                    PrismTextButton(title: "Try Again", module: .spaceMap) {
+                        screen.loadContents(of: focus)
+                    }
+                }
+            } else {
+                Image(systemName: focus.isUnreadable ? "lock.fill" : "tray")
+                    .font(.system(size: 26, weight: .light))
+                    .foregroundStyle(Ink.tertiary)
+                Text(focus.isUnreadable ? "Spruce couldn't read this folder" : "This folder is empty")
+                    .font(SpruceFont.callout)
+                    .foregroundStyle(Ink.secondary)
+                    .multilineTextAlignment(.center)
+            }
             Spacer()
         }
         .frame(maxWidth: .infinity)
@@ -115,10 +137,10 @@ struct SpaceMapListHeader: View {
                     .contentTransition(.numericText())
             }
             Spacer(minLength: Spacing.xs)
-            if screen.isRescanning(focus) {
+            if screen.isLoading(focus) {
                 ProgressView()
                     .controlSize(.small)
-                    .help("Rescanning…")
+                    .help(focus.isCollapsed ? "Loading…" : "Rescanning…")
             } else if focus.isReal {
                 PrismIconButton(symbol: "arrow.clockwise", help: "Rescan this folder") {
                     screen.rescan(focus)

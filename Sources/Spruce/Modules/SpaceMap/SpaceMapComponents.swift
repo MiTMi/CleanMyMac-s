@@ -1,4 +1,5 @@
 import AppKit
+import Observation
 import SpruceCore
 import SpruceMac
 import SwiftUI
@@ -93,6 +94,54 @@ struct SpaceMapCapacityBar: View {
 enum SpaceMapHoverSubject {
     case node(SpaceMapNode)
     case smaller(SpaceMapSmallerGroup)
+}
+
+/// Where the pointer is over a map. Only `SpaceMapPointerCard` reads it, so moving the
+/// mouse re-evaluates the hover card instead of the whole map (layout and Canvas).
+@Observable
+final class SpaceMapPointer {
+    var location: CGPoint? = nil
+}
+
+/// The hover card, kept next to the pointer.
+struct SpaceMapPointerCard: View {
+    let pointer: SpaceMapPointer
+    let screen: SpaceMapScreenModel
+    let subject: SpaceMapHoverSubject?
+    /// Size the share is measured against (the focused folder).
+    let total: Int64
+    /// The map's size (the card stays inside it).
+    let bounds: CGSize
+
+    var body: some View {
+        if let subject, let point = pointer.location {
+            let origin = SpaceMapHoverCard.origin(near: point, in: bounds)
+            SpaceMapHoverCard(screen: screen, subject: subject, total: total)
+                .offset(x: origin.x, y: origin.y)
+                .transition(.opacity)
+        }
+    }
+}
+
+/// What a map's Canvas draws besides the tree, read while the map's body is evaluated:
+/// a Canvas only redraws when its view is invalidated, and reads made inside its
+/// drawing closure aren't observed.
+struct SpaceMapDrawState {
+    let hovered: SpaceMapNode?
+    let highlighted: SpaceMapNode?
+    let hoveringSmaller: Bool
+    let showsSmallerItems: Bool
+    /// Read so that any change to the selection redraws the map.
+    let selectedIDs: Set<ObjectIdentifier>
+
+    @MainActor
+    init(_ screen: SpaceMapScreenModel) {
+        hovered = screen.hovered
+        highlighted = screen.highlighted
+        hoveringSmaller = screen.hoveringSmaller
+        showsSmallerItems = screen.showsSmallerItems
+        selectedIDs = screen.selectedIDs
+    }
 }
 
 /// Floating details for the item under the pointer.

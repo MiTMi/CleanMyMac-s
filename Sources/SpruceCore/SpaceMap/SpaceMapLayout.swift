@@ -426,6 +426,8 @@ public struct SpaceMapRingSegment: Identifiable, Sendable {
     public let bytes: Int64
     /// Number of children folded into a `node == nil` segment.
     public let foldedCount: Int
+    /// The children folded into a `node == nil` segment (empty otherwise).
+    public let folded: [SpaceMapNode]
     /// Position among its siblings (largest = 0).
     public let rank: Int
 
@@ -452,30 +454,31 @@ public enum SpaceMapSunburst {
             let outer = inner + ring
             var angle = start
             var foldedBytes: Int64 = 0
-            var foldedCount = 0
+            var folded: [SpaceMapNode] = []
             for (rank, child) in node.children.enumerated() where child.size > 0 {
                 let childSpan = span * Double(child.size) / total
                 if childSpan < minAngle {
                     foldedBytes += child.size
-                    foldedCount += 1
+                    folded.append(child)
                     continue
                 }
                 segments.append(SpaceMapRingSegment(id: segments.count, node: child, parent: node, depth: depth,
                                                     startAngle: angle, endAngle: angle + childSpan,
                                                     innerRadius: inner, outerRadius: outer, bytes: child.size,
-                                                    foldedCount: 0, rank: rank))
+                                                    foldedCount: 0, folded: [], rank: rank))
                 if child.isFolder {
                     visit(child, depth: depth + 1, start: angle, span: childSpan)
                 }
                 angle += childSpan
             }
-            if foldedCount > 0 {
+            if !folded.isEmpty {
                 let foldedSpan = span * Double(foldedBytes) / total
                 if foldedSpan >= minAngle / 2 {
                     segments.append(SpaceMapRingSegment(id: segments.count, node: nil, parent: node, depth: depth,
                                                         startAngle: angle, endAngle: angle + foldedSpan,
                                                         innerRadius: inner, outerRadius: outer, bytes: foldedBytes,
-                                                        foldedCount: foldedCount, rank: node.children.count))
+                                                        foldedCount: folded.count, folded: folded,
+                                                        rank: node.children.count))
                 }
             }
         }

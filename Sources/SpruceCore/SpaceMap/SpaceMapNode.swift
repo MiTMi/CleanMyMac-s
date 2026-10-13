@@ -23,7 +23,8 @@ public enum SpaceMapNodeKind: String, Sendable, Codable, CaseIterable {
 /// single owner (the app's main actor), which is the only code that mutates it
 /// afterwards (`detach`, `replaceContents`, `insertChild`). Children are always kept
 /// sorted largest first; folder totals are post-order aggregates of their children
-/// (hard-linked files are counted once by the scanner).
+/// (hard-linked files are counted once by the scanner). Small folders with many items
+/// may be `isCollapsed`: exact totals, contents loaded on demand by a rescan.
 public final class SpaceMapNode: Identifiable, Hashable, CustomStringConvertible, @unchecked Sendable {
     /// Last path component (for a scan root: the display name, e.g. "Macintosh HD").
     public let name: String
@@ -38,6 +39,10 @@ public final class SpaceMapNode: Identifiable, Hashable, CustomStringConvertible
     public internal(set) var cloudOnlyBytes: Int64
     /// The folder could not be listed (permissions / privacy protection).
     public internal(set) var isUnreadable: Bool
+    /// A folder whose contents were measured but not kept, to bound the memory a map of a
+    /// whole disk needs (see `SpaceMapFoldPolicy.collapseBelowBytes`). Its totals are exact;
+    /// rescan it (`SpaceMapScanOptions.rescanning(_:inFull: true)`) before showing what's inside.
+    public internal(set) var isCollapsed: Bool
     /// File system identity recorded at scan time (0 for pseudo-nodes).
     public let inode: UInt64
     /// Largest first.
@@ -63,6 +68,7 @@ public final class SpaceMapNode: Identifiable, Hashable, CustomStringConvertible
         self.inode = inode
         self.cloudOnlyBytes = cloudOnlyBytes
         self.isUnreadable = isUnreadable
+        self.isCollapsed = false
         self.basePath = basePath
         self.children = []
     }
@@ -117,8 +123,8 @@ public final class SpaceMapNode: Identifiable, Hashable, CustomStringConvertible
     /// Backed by a real file system object (not a folded group or a pseudo-node).
     public var isReal: Bool { kind != .smallFiles && kind != .system }
 
-    /// Can be opened as the focus of the map.
-    public var canZoom: Bool { isFolder && !children.isEmpty }
+    /// Can be opened as the focus of the map (a collapsed folder loads its contents first).
+    public var canZoom: Bool { isFolder && (!children.isEmpty || isCollapsed) }
 
     /// Files plus folders inside.
     public var itemCount: Int { fileCount + folderCount }
@@ -238,6 +244,15 @@ public final class SpaceMapNode: Identifiable, Hashable, CustomStringConvertible
         children.sort(by: SpaceMapNode.isOrderedBefore)
     }
 
+    /// Drops the children of a finished folder, keeping its totals (`isCollapsed`). Returns
+    /// them so the caller decides when their memory is released.
+    func collapse() -> [SpaceMapNode] {
+        let dropped = children
+        children = []
+        isCollapsed = true
+        return dropped
+    }
+
     /// Applies a change below this node to it and every ancestor, keeping children sorted.
     func propagate(bytes: Int64, files: Int, folders: Int, cloud: Int64) {
         var current: SpaceMapNode? = self
@@ -288,6 +303,7 @@ public final class SpaceMapNode: Identifiable, Hashable, CustomStringConvertible
         cloudOnlyBytes = fresh.cloudOnlyBytes
         modifiedStamp = fresh.modifiedStamp
         isUnreadable = fresh.isUnreadable
+        isCollapsed = fresh.isCollapsed
         parent?.propagate(bytes: deltaBytes, files: deltaFiles, folders: deltaFolders, cloud: deltaCloud)
     }
 }

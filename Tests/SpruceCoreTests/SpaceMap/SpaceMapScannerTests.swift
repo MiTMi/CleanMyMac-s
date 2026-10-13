@@ -98,6 +98,81 @@ final class SpaceMapScannerTests: XCTestCase {
         XCTAssertEqual(many.size, DiskUsage.measure(root + "/Many").bytes)
     }
 
+    func testSmallFoldersWithManyItemsCollapseAndLoadInFull() async throws {
+        let base = SpaceMapScanner.standardize(root)
+        let fm = FileManager.default
+        try fm.createDirectory(atPath: root + "/Cache/a/b", withIntermediateDirectories: true)
+        for i in 0..<30 { try write(root + "/Cache/a/f\(i).dat", bytes: 600) }
+        for i in 0..<20 { try write(root + "/Cache/a/b/g\(i).dat", bytes: 600) }
+        let full = try await scan()
+        let policy = SpaceMapFoldPolicy(collapseBelowBytes: 10_000_000, collapseMinItems: 12)
+        let output = try await scan(SpaceMapScanOptions(fold: policy, workers: 3))
+
+        // Totals are exact, whatever is collapsed.
+        XCTAssertEqual(output.root.size, full.root.size)
+        XCTAssertEqual(output.root.fileCount, full.root.fileCount)
+        XCTAssertEqual(output.root.folderCount, full.root.folderCount)
+        XCTAssertFalse(output.root.isCollapsed, "the scan root is never collapsed")
+
+        let cache = try XCTUnwrap(output.root.child(named: "Cache"))
+        let fullCache = try XCTUnwrap(full.root.child(named: "Cache"))
+        XCTAssertTrue(cache.isCollapsed)
+        XCTAssertTrue(cache.children.isEmpty)
+        XCTAssertTrue(cache.canZoom, "a collapsed folder can still be opened")
+        XCTAssertEqual(cache.size, fullCache.size)
+        XCTAssertEqual(cache.fileCount, 50)
+        XCTAssertEqual(cache.folderCount, 2)
+        // Folders with few items are kept as they are.
+        let movies = try XCTUnwrap(output.root.child(named: "Movies"))
+        XCTAssertFalse(movies.isCollapsed)
+        XCTAssertNotNil(movies.child(named: "Trips"))
+        XCTAssertEqual(output.stats.files, full.stats.files)
+
+        // Loading the collapsed folder in full brings everything back without changing totals.
+        let options = SpaceMapScanOptions(fold: policy, workers: 3).rescanning(cache, inFull: true)
+        XCTAssertEqual(options.fold.collapseBelowBytes, 0)
+        XCTAssertEqual(options.rootName, "Cache")
+        XCTAssertEqual(options.expectedBytes, cache.size)
+        let fresh = try await SpaceMapScanner.scan(path: base + "/Cache", options: options)
+        let before = output.root.size
+        cache.replaceContents(with: fresh.root)
+        XCTAssertFalse(cache.isCollapsed)
+        XCTAssertEqual(output.root.size, before)
+        XCTAssertNotNil(output.root.node(atPath: base + "/Cache/a/b/g3.dat"))
+        XCTAssertFalse(try XCTUnwrap(cache.child(named: "a")).isCollapsed)
+
+        // A folder loaded in full that grew past the threshold is folded like a scan would.
+        let sizeBefore = full.root.size
+        let collapsedCount = policy.collapseDescendants(of: full.root)
+        XCTAssertGreaterThan(collapsedCount, 0)
+        XCTAssertTrue(try XCTUnwrap(full.root.child(named: "Cache")).isCollapsed)
+        XCTAssertFalse(full.root.isCollapsed)
+        XCTAssertEqual(full.root.size, sizeBefore)
+        XCTAssertEqual(SpaceMapFoldPolicy().collapseDescendants(of: output.root), 0, "no threshold, nothing to do")
+    }
+
+    func testRescanOptionsKeepCollapsingUnlessLoadingInFull() {
+        let node = SpaceMapNode.folder("Docs", children: [.file("a", size: 4_096)])
+        let base = SpaceMapScanOptions(fold: SpaceMapFoldPolicy(collapseBelowBytes: 5_000_000), workers: 2,
+                                       expectedBytes: 9_999, rootName: "Disk")
+        let rescan = base.rescanning(node)
+        XCTAssertEqual(rescan.fold.collapseBelowBytes, 5_000_000)
+        XCTAssertEqual(rescan.rootName, "Docs")
+        XCTAssertEqual(rescan.expectedBytes, 4_096)
+        XCTAssertEqual(rescan.workers, 2)
+        XCTAssertEqual(rescan.boundary, base.boundary)
+        XCTAssertEqual(base.rescanning(node, inFull: true).fold.collapseBelowBytes, 0)
+    }
+
+    func testCollapseThresholdScalesWithTheVolume() {
+        XCTAssertEqual(SpaceMapFoldPolicy.collapseThreshold(volumeUsed: nil), 16_000_000)
+        XCTAssertEqual(SpaceMapFoldPolicy.collapseThreshold(volumeUsed: 0), 16_000_000)
+        XCTAssertEqual(SpaceMapFoldPolicy.collapseThreshold(volumeUsed: 300_000_000_000), 30_000_000)
+        XCTAssertEqual(SpaceMapFoldPolicy.collapseThreshold(volumeUsed: 2_000_000_000), 4_000_000)
+        XCTAssertEqual(SpaceMapFoldPolicy.collapseThreshold(volumeUsed: 8_000_000_000_000), 256_000_000)
+        XCTAssertEqual(SpaceMapFoldPolicy().collapseBelowBytes, 0, "collapsing is opt-in")
+    }
+
     func testExclusionsAndHiddenFiles() async throws {
         let base = SpaceMapScanner.standardize(root)
         let options = SpaceMapScanOptions(boundary: SpaceMapBoundary(excludedPaths: [base + "/Skip"]),

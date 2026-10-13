@@ -6,11 +6,15 @@ import SwiftUI
 /// Sunburst view of the focused folder: the folder in the middle, four rings of
 /// descendants, every arc's angle proportional to its size. Click an arc to zoom into
 /// it, the middle to zoom out.
+///
+/// The layout is cached by the screen model and the pointer position lives in
+/// `SpaceMapPointer`, read only by the hover card: moving the mouse redraws the rings
+/// only when the arc under the pointer changes.
 struct SpaceMapRingsCanvas: View {
     let screen: SpaceMapScreenModel
     let focus: SpaceMapNode
 
-    @State private var hoverPoint: CGPoint?
+    @State private var pointer = SpaceMapPointer()
     @State private var hoveredSegment: Int?
 
     private static let maxDepth = 4
@@ -21,10 +25,13 @@ struct SpaceMapRingsCanvas: View {
             let center = CGPoint(x: size.width / 2, y: size.height / 2)
             let outer = max(40, min(size.width, size.height) / 2 - 10)
             let hole = outer * 0.26
-            let segments = layout(outer: Double(outer), hole: Double(hole))
+            let segments = screen.ringSegments(for: focus, holeRadius: Double(hole), outerRadius: Double(outer),
+                                               maxDepth: Self.maxDepth)
+            let state = SpaceMapDrawState(screen)
+            let hovered = hoveredSegment
             ZStack(alignment: .topLeading) {
                 Canvas { context, _ in
-                    drawRings(segments, center: center, hole: hole, context: &context)
+                    drawRings(segments, center: center, hole: hole, hovered: hovered, state: state, context: &context)
                 }
                 .contentShape(Rectangle())
                 .onContinuousHover(coordinateSpace: .local) { phase in
@@ -41,18 +48,13 @@ struct SpaceMapRingsCanvas: View {
                     }
                 }
                 centerLabel(center: center, hole: hole)
-                hoverCard(segments: segments, size: size)
+                SpaceMapPointerCard(pointer: pointer, screen: screen, subject: hoverSubject(segments), total: focus.size,
+                                    bounds: size)
             }
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Ring map of \(focus.name), \(ByteFormat.string(focus.size))")
         .accessibilityHint("Use the list beside the map to browse and select items.")
-    }
-
-    private func layout(outer: Double, hole: Double) -> [SpaceMapRingSegment] {
-        _ = screen.revision
-        return SpaceMapSunburst.layout(focus: focus, maxDepth: Self.maxDepth, holeRadius: hole, outerRadius: outer,
-                                       minAngle: 0.008)
     }
 
     // MARK: Overlays
@@ -79,24 +81,12 @@ struct SpaceMapRingsCanvas: View {
         .allowsHitTesting(false)
     }
 
-    @ViewBuilder
-    private func hoverCard(segments: [SpaceMapRingSegment], size: CGSize) -> some View {
-        if let point = hoverPoint, let index = hoveredSegment, index < segments.count {
-            let segment = segments[index]
-            let origin = SpaceMapHoverCard.origin(near: point, in: size)
-            Group {
-                if let node = segment.node {
-                    SpaceMapHoverCard(screen: screen, subject: .node(node), total: focus.size)
-                } else {
-                    let folded = segment.parent.children.filter { child in
-                        !segments.contains { $0.node === child }
-                    }
-                    SpaceMapHoverCard(screen: screen, subject: .smaller(SpaceMapSmallerGroup(nodes: folded)),
-                                      total: focus.size)
-                }
-            }
-            .offset(x: origin.x, y: origin.y)
-        }
+    /// What the hover card shows: the arc's item, or the children a folded arc stands for.
+    private func hoverSubject(_ segments: [SpaceMapRingSegment]) -> SpaceMapHoverSubject? {
+        guard let index = hoveredSegment, index < segments.count else { return nil }
+        let segment = segments[index]
+        if let node = segment.node { return .node(node) }
+        return .smaller(SpaceMapSmallerGroup(nodes: segment.folded))
     }
 
     private func hoveredNode(_ segments: [SpaceMapRingSegment]) -> SpaceMapNode? {
@@ -109,13 +99,13 @@ struct SpaceMapRingsCanvas: View {
     private func handleHover(_ phase: HoverPhase, segments: [SpaceMapRingSegment], center: CGPoint) {
         switch phase {
         case .active(let location):
-            hoverPoint = location
+            pointer.location = location
             let index = SpaceMapSunburst.hitTest(segments, dx: Double(location.x - center.x), dy: Double(location.y - center.y))
             if hoveredSegment != index { hoveredSegment = index }
             let node = index.flatMap { segments[$0].node }
             if screen.hovered !== node { screen.hovered = node }
         case .ended:
-            hoverPoint = nil
+            pointer.location = nil
             hoveredSegment = nil
             if screen.hovered != nil { screen.hovered = nil }
         }
@@ -149,8 +139,8 @@ struct SpaceMapRingsCanvas: View {
 
     // MARK: Drawing
 
-    private func drawRings(_ segments: [SpaceMapRingSegment], center: CGPoint, hole: CGFloat,
-                           context: inout GraphicsContext) {
+    private func drawRings(_ segments: [SpaceMapRingSegment], center: CGPoint, hole: CGFloat, hovered hoveredIndex: Int?,
+                           state: SpaceMapDrawState, context: inout GraphicsContext) {
         let holePath = Path(ellipseIn: CGRect(x: center.x - hole + 3, y: center.y - hole + 3,
                                               width: (hole - 3) * 2, height: (hole - 3) * 2))
         context.fill(holePath, with: .color(Color.white.opacity(0.06)))
@@ -169,7 +159,7 @@ struct SpaceMapRingsCanvas: View {
 
         for (index, segment) in segments.enumerated() {
             let path = arcPath(segment, center: center)
-            let hovered = hoveredSegment == index
+            let hovered = hoveredIndex == index
             if let node = segment.node {
                 let rank = branchRank[node.id] ?? segment.rank
                 let base = node.kind == .system ? SpaceMapStyle.system
@@ -178,7 +168,7 @@ struct SpaceMapRingsCanvas: View {
                 if screen.isSelected(node) || screen.isCovered(node) {
                     context.fill(path, with: .color(SpaceMapStyle.selection.opacity(0.55)))
                 }
-                if screen.highlighted === node || screen.hovered === node {
+                if state.highlighted === node || state.hovered === node {
                     context.stroke(path, with: .color(Color.white.opacity(0.9)), lineWidth: 2)
                 } else {
                     context.stroke(path, with: .color(Color.black.opacity(0.35)), lineWidth: 0.8)
