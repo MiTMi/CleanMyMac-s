@@ -77,9 +77,9 @@ enum SettingsTab: String, CaseIterable, Identifiable {
         case .general: return "Startup, menu bar, sounds and motion."
         case .scanning: return "What Checkup, Cleanup and Clutter look at."
         case .ignoreList: return "Files, folders and apps Spruce never touches."
-        case .protection: return "Real-time protection and malware scan depth."
+        case .protection: return "Real-time protection, scan depth and detection sources."
         case .notifications: return "Which alerts and reminders Spruce may show."
-        case .privacy: return "Access Spruce needs, and why. Nothing leaves your Mac."
+        case .privacy: return "Access Spruce needs, and why. Your files never leave your Mac."
         case .advanced: return "Logs, app data, history and resets."
         case .about: return "Version, safety principles and credits."
         }

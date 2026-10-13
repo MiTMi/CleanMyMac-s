@@ -3,8 +3,8 @@ import SpruceCore
 import SpruceMac
 import SwiftUI
 
-/// Protection landing: the three tools as cards, plus real-time protection and the state
-/// of macOS's own protection layers.
+/// Protection landing: the three tools as cards, plus real-time protection, the state
+/// of macOS's own protection layers and the detection sources the malware scan uses.
 struct ProtectionHubScreen: View {
     @Bindable var screen: ProtectionScreenModel
     @Environment(\.colorSchemeContrast) private var contrast
@@ -22,6 +22,7 @@ struct ProtectionHubScreen: View {
                     ProtectionRealtimeCard(screen: screen)
                     ProtectionAppleStatusCard(screen: screen)
                 }
+                ProtectionDetectionSourcesCard(screen: screen)
             }
             .frame(maxWidth: Spacing.readableWidth)
             .padding(.horizontal, Spacing.xl)

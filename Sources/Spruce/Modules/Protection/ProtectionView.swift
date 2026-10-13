@@ -39,6 +39,8 @@ struct ProtectionRootScreen: View {
         .onChange(of: screen.malware.phase) { old, new in screen.phaseChanged(.malware, from: old, to: new) }
         .onChange(of: screen.privacy.phase) { old, new in screen.phaseChanged(.privacy, from: old, to: new) }
         .onChange(of: screen.permissions.phase) { old, new in screen.phaseChanged(.permissions, from: old, to: new) }
+        // VirusTotal answers arrive in the background; put them on the review rows.
+        .onChange(of: screen.detection.virusTotalRevision) { _, _ in screen.applyVirusTotalAnswers() }
         .onReceive(NotificationCenter.default.publisher(for: ProtectionRealtimeMonitor.eventNotification)) { _ in
             screen.reloadRealtimeEvents()
         }

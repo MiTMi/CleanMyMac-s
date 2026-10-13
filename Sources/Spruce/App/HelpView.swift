@@ -222,7 +222,7 @@ enum HelpContent {
             return [
                 "Full Disk Access lets Spruce see Mail downloads, Safari data, and other folders macOS protects. Without it, those scans skip what they can't read.",
                 "App Management lets Spruce update and uninstall apps that macOS guards. Notifications let alerts and the weekly reminder reach you. Login Items is where macOS lists what Spruce helps you turn off.",
-                "Spruce never sends your data anywhere. The only network requests are app update checks (when you open Updater; with update alerts on, also during Checkup and once a day) and downloading an update you choose to install.",
+                "Spruce never sends your files anywhere. Network requests are limited to app update checks (when you open Updater; with update alerts on, also during Checkup and once a day), downloading an update you choose to install, Protection's threat list (at most once a day while it's on in Settings), and VirusTotal lookups once you add your own key, which send a file's SHA-256 fingerprint only.",
             ]
         case .shortcuts:
             return []

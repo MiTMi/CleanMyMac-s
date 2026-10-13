@@ -120,10 +120,11 @@ struct SettingsPrivacyTab: View {
             VStack(alignment: .leading, spacing: Spacing.s + 2) {
                 HStack(spacing: Spacing.s) {
                     Image(systemName: "hand.raised.fill").foregroundStyle(ModuleID.applications.palette.accentText)
-                    Text("No data leaves your Mac").font(SpruceFont.bodyStrong).foregroundStyle(Ink.primary)
+                    Text("Your files stay on your Mac").font(SpruceFont.bodyStrong).foregroundStyle(Ink.primary)
                 }
                 SettingsPrivacyPoint(symbol: "chart.bar.xaxis", text: "No analytics, telemetry or crash reporting, and no account.")
-                SettingsPrivacyPoint(symbol: "network", text: "The only network requests are update checks (app update feeds, the App Store lookup and Homebrew), made when you open Updater or keep update alerts on.")
+                SettingsPrivacyPoint(symbol: "network", text: "Network requests are limited to update checks (app update feeds, the App Store lookup and Homebrew), made when you open Updater or keep update alerts on, and Protection's threat list, downloaded from Spruce's GitHub page at most once a day while it's on.")
+                SettingsPrivacyPoint(symbol: "network.badge.shield.half.filled", text: "VirusTotal is asked only after you add your own key in Protection settings, and only with a file's SHA-256 fingerprint, never the file itself.")
                 SettingsPrivacyPoint(symbol: "internaldrive", text: "Settings, history and the operations log stay in your Library folder. Advanced lets you open or clear them.")
                 SettingsPrivacyPoint(symbol: "trash.slash", text: "Every removal goes through one audited path that refuses protected system locations and keeps a log.")
             }

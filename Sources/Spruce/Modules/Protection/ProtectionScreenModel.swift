@@ -53,7 +53,7 @@ enum ProtectionTool: String, CaseIterable, Identifiable {
                 IdleFeature(symbol: "bolt.horizontal.circle", title: "Startup items and helpers",
                             detail: "Checks how threats usually stay on a Mac: launch agents, daemons, helper tools and scheduled jobs."),
                 IdleFeature(symbol: "checkmark.seal", title: "Signatures and known samples",
-                            detail: "Verifies code signatures and matches files against documented malware."),
+                            detail: "Verifies code signatures and matches files against documented malware and Apple's XProtect rules."),
                 IdleFeature(symbol: "trash", title: "Safe removal",
                             detail: "Stops what's running, then moves threats to the Trash so nothing is lost by mistake."),
             ]
@@ -145,6 +145,12 @@ final class ProtectionScreenModel {
     var confirmPrivacyClean = false
     var confirmPermissionReset = false
 
+    /// Rows whose "Check with VirusTotal" was pressed and hasn't come back yet (the engine's
+    /// `detection.virusTotalPending` follows a moment later).
+    private(set) var virusTotalRequests: Set<String> = []
+    /// Rows whose VirusTotal page couldn't be opened (no readable file to fingerprint).
+    private(set) var virusTotalLinkProblems: [String: String] = [:]
+
     /// How often Spruce scans on its own (Protection hub › Automatic scans).
     var backgroundSchedule: ProtectionBackgroundSchedule {
         didSet {
@@ -188,7 +194,16 @@ final class ProtectionScreenModel {
         reloadRealtimeEvents()
         syncReports()
         adoptAutomaticResults()
+        applyVirusTotalAnswers()
         if appleStatus == nil { refreshAppleStatus() }
+        refreshDetectionStatus()
+    }
+
+    /// Re-reads what the hub shows about the detection sources (Apple's XProtect rules, the
+    /// threat list, the VirusTotal key). Cheap after the first time; never blocks the screen.
+    func refreshDetectionStatus() {
+        let engine = self.engine
+        Task { await engine.refreshDetectionStatus() }
     }
 
     func refreshFullDiskAccess() {
@@ -261,6 +276,8 @@ final class ProtectionScreenModel {
         }
         if old == .scanning && new == .results {
             syncReports()
+            // Answers that came back before the list was shown.
+            if tool == .malware { applyVirusTotalAnswers() }
             let found = !flow(for: tool).groups.allItems.isEmpty
             if tool == .malware && found {
                 SpruceSound.play(.attention)
@@ -337,6 +354,69 @@ final class ProtectionScreenModel {
         for item in group.allItems {
             let removable = selected && ProtectionThreatPresentation.isRemovable(item)
             malware.setSelected(removable, itemID: item.id)
+        }
+    }
+
+    // MARK: VirusTotal
+
+    /// What the screens show about Apple's rules, the threat list and VirusTotal.
+    var detection: ProtectionDetectionState { engine.detection }
+
+    /// Puts VirusTotal answers that arrived since the scan on the review rows (the engine
+    /// updates its own results; the flow's list is a copy). An answer only goes on a row
+    /// whose file it is about, and selection never changes.
+    func applyVirusTotalAnswers() {
+        let known = detection.virusTotalByItemID
+        guard !known.isEmpty, !malware.groups.isEmpty else { return }
+        var answers: [String: VirusTotalVerdict] = [:]
+        for item in malware.groups.allItems {
+            guard let verdict = known[item.id], ProtectionThreatPresentation.isAbout(verdict, item) else { continue }
+            answers[item.id] = verdict
+        }
+        var groups = malware.groups
+        if groups.applyVirusTotal(answers) { malware.groups = groups }
+    }
+
+    /// The VirusTotal answer for a row's file: recorded on the row, arrived since, or known
+    /// for its hash. Answers about another file (the file at that path changed) are left out.
+    func virusTotalVerdict(for item: ScanItem) -> VirusTotalVerdict? {
+        guard let hash = item.protectionSHA256 else { return detection.verdict(for: item) }
+        let candidates = [detection.virusTotalByItemID[item.id], item.virusTotalVerdict, detection.virusTotalBySHA256[hash]]
+        return candidates.compactMap { $0 }.first { ProtectionThreatPresentation.isAbout($0, item) }
+    }
+
+    /// True while the row's file is being looked up (or waits for a free lookup).
+    func isCheckingVirusTotal(_ item: ScanItem) -> Bool {
+        virusTotalRequests.contains(item.id) || detection.isLookingUp(item)
+    }
+
+    /// "Check with VirusTotal": the engine fingerprints the file on this Mac and sends only
+    /// its SHA-256 (the file is never uploaded). Runs in the background; the answer lands on
+    /// the row through `detection`, and a problem is kept there for the row.
+    func checkWithVirusTotal(_ item: ScanItem) {
+        guard !isCheckingVirusTotal(item) else { return }
+        virusTotalRequests.insert(item.id)
+        virusTotalLinkProblems[item.id] = nil
+        let engine = self.engine
+        Task { [weak self] in
+            _ = await engine.checkWithVirusTotal(item)
+            guard let self else { return }
+            self.virusTotalRequests.remove(item.id)
+            self.applyVirusTotalAnswers()
+        }
+    }
+
+    /// "Open in VirusTotal": the file's page on virustotal.com in the browser. The hash is
+    /// computed on this Mac when the row has none; nothing is sent until the page opens.
+    func openInVirusTotal(_ item: ScanItem) {
+        virusTotalLinkProblems[item.id] = nil
+        let engine = self.engine
+        Task { [weak self] in
+            if let page = await engine.virusTotalPage(for: item) {
+                NSWorkspace.shared.open(page)
+            } else {
+                self?.virusTotalLinkProblems[item.id] = "Spruce couldn't read this file to fingerprint it, so it has no VirusTotal page."
+            }
         }
     }
 
@@ -493,6 +573,53 @@ enum ProtectionThreatPresentation {
     }
 
     static func related(_ item: ScanItem) -> [String] {
-        (item.metadata[ProtectionMetaKey.related] ?? "").split(separator: "\n").map(String.init).filter { !$0.isEmpty }
+        lines(item, ProtectionMetaKey.related)
+    }
+
+    /// The YARA rules that matched the row's file: where each set comes from ("Apple
+    /// XProtect") and each rule as "what it detects (rule name)".
+    static func ruleMatches(_ item: ScanItem) -> (sources: [String], rules: [String]) {
+        let names = lines(item, ProtectionMetaKey.rules)
+        let labels = lines(item, ProtectionMetaKey.ruleLabels)
+        let rules = names.enumerated().map { index, name -> String in
+            let label = labels.indices.contains(index) ? labels[index] : name
+            return label == name ? name : "\(label) (\(name))"
+        }
+        return (lines(item, ProtectionMetaKey.ruleSources), rules)
+    }
+
+    /// True when the row has a file VirusTotal can be asked about (or its hash).
+    static func canCheckWithVirusTotal(_ item: ScanItem) -> Bool {
+        item.protectionLookupPath != nil || item.protectionSHA256 != nil
+    }
+
+    /// False when the answer is about a different file than the row's (known hashes differ).
+    static func isAbout(_ verdict: VirusTotalVerdict, _ item: ScanItem) -> Bool {
+        guard let hash = item.protectionSHA256 else { return true }
+        return VirusTotalAPI.normalizedSHA256(verdict.sha256) == hash
+    }
+
+    /// Short marker for the row ("VirusTotal 34/72"), nil when there's nothing to flag.
+    static func virusTotalChip(_ verdict: VirusTotalVerdict) -> (text: String, color: Color)? {
+        switch verdict.level {
+        case .flagged: return ("VirusTotal \(verdict.malicious)/\(verdict.engines)", StatusColor.danger)
+        case .someFlags: return ("VirusTotal \(verdict.malicious + verdict.suspicious)/\(verdict.engines)", StatusColor.warning)
+        case .clean: return ("VirusTotal 0/\(verdict.engines)", StatusColor.success)
+        case .unknown: return nil
+        }
+    }
+
+    private static func lines(_ item: ScanItem, _ key: String) -> [String] {
+        (item.metadata[key] ?? "").split(separator: "\n").map(String.init).filter { !$0.isEmpty }
+    }
+}
+
+/// Opens Settings on the Protection tab (the tab is remembered in user defaults, which the
+/// Settings window follows).
+@MainActor
+enum ProtectionSettingsLink {
+    static func open(_ openSettings: OpenSettingsAction) {
+        UserDefaults.standard.set(SettingsTab.protection.rawValue, forKey: SettingsTab.storageKey)
+        openSettings()
     }
 }
