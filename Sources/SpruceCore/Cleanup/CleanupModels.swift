@@ -110,7 +110,7 @@ public enum CleanupCategory: String, CaseIterable, Codable, Sendable, Identifiab
     public var detail: String {
         switch self {
         case .userCaches:
-            return "Data apps store to load faster. Apps rebuild it as needed; caches of open apps are left alone."
+            return "Data apps store to load faster. Apps rebuild it as needed; Spruce asks to quit open apps before cleaning their caches."
         case .systemCaches:
             return "Caches of macOS services and shared components. Needs your administrator password."
         case .userLogs:
@@ -256,8 +256,10 @@ public struct CleanupRule: Sendable, Hashable, Identifiable {
         case skip
         /// Selected as usual (CleanMyMac 5 behaviour for app caches): the Clean / Run
         /// step asks to quit the app first, and the row is skipped if it stays open.
-        /// While the app is open its content is counted regardless of `minAge`, since
-        /// nothing is removed before it quits.
+        /// While the app is open, and once it has quit, `minAge` shrinks to
+        /// `CleanupScanner.quitFirstFloor`, since nothing is removed before it quits.
+        /// Applies only when every open app holding the row can be quit from the sheet
+        /// (not background-only); otherwise the row is treated as `skip`.
         case quitFirst
         /// The app being open doesn't matter (e.g. log files older than a week, which no
         /// app is still writing).
@@ -429,6 +431,9 @@ public struct CleanupContext: Sendable {
     public var startupVolumeName: String
     public var externalVolumes: [CleanupVolume]
     public var runningBundleIDs: Set<String>
+    /// The running apps a quit sheet can show and quit (not background-only); nil means
+    /// all of `runningBundleIDs`.
+    public var quittableBundleIDs: Set<String>?
     /// Executable names of running processes (Xcode tooling detection).
     public var runningProcessNames: Set<String>
     public var hasFullDiskAccess: Bool
@@ -451,6 +456,7 @@ public struct CleanupContext: Sendable {
         startupVolumeName: String = "Macintosh HD",
         externalVolumes: [CleanupVolume] = [],
         runningBundleIDs: Set<String> = [],
+        quittableBundleIDs: Set<String>? = nil,
         runningProcessNames: Set<String> = [],
         hasFullDiskAccess: Bool = true,
         ownBundleID: String? = nil,
@@ -469,6 +475,7 @@ public struct CleanupContext: Sendable {
         self.startupVolumeName = startupVolumeName
         self.externalVolumes = externalVolumes
         self.runningBundleIDs = runningBundleIDs
+        self.quittableBundleIDs = quittableBundleIDs
         self.runningProcessNames = runningProcessNames
         self.hasFullDiskAccess = hasFullDiskAccess
         self.ownBundleID = ownBundleID

@@ -132,12 +132,16 @@ final class CleanupScreenModel {
         }.count
     }
 
-    /// Open apps whose selected caches Clean asks to quit first.
+    /// Open apps whose selected caches Clean asks to quit first, counted the way the
+    /// quit sheet finds them.
     var appsToQuitCount: Int {
-        Set(flow.selectedItems.compactMap { item -> String? in
-            guard item.metadata[CleanupMetadataKey.quitToClean] == "1" else { return nil }
-            return item.metadata[CleanupMetadataKey.bundleID] ?? item.metadata[CleanupMetadataKey.owner]
-        }).count
+        let rows = flow.selectedItems.filter { $0.metadata[CleanupMetadataKey.quitToClean] == "1" }
+        guard !rows.isEmpty else { return 0 }
+        let ownPID = ProcessInfo.processInfo.processIdentifier
+        let running = Set(NSWorkspace.shared.runningApplications.filter {
+            !$0.isTerminated && $0.activationPolicy != .prohibited && $0.processIdentifier != ownPID
+        }.compactMap(\.bundleIdentifier))
+        return CleanupOwnership.runningOwners(of: rows, running: running).count
     }
 
     var selectionNeedsAdmin: Bool {

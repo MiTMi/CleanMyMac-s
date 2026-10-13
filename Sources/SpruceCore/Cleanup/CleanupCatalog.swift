@@ -421,7 +421,9 @@ public enum CleanupCatalog {
                     note: "Cache of a sandboxed app, rebuilt as needed."),
         CleanupRule(id: "caches.groupContainers", category: .userCaches, title: "Shared App Caches",
                     paths: ["~/Library/Group Containers/*/Library/Caches"], needsFullDiskAccess: true, minAge: hour,
-                    gate: .ownerAtWildcard, whileRunning: .quitFirst, reviewNames: ["*.com.apple.*", "group.com.apple.*", "com.apple.*"],
+                    // Not quitFirst: extensions and helpers that share a group container
+                    // keep writing after the app quits, and the running-app check can't see them.
+                    gate: .ownerAtWildcard, reviewNames: ["*.com.apple.*", "group.com.apple.*", "com.apple.*"],
                     addsPermanentZone: true,
                     note: "Cache shared by a family of apps, rebuilt as needed."),
         CleanupRule(id: "caches.user", category: .userCaches, title: "App Caches",

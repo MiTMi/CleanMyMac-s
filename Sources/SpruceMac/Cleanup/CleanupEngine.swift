@@ -237,6 +237,20 @@ public final class CleanupEngine: CheckupContributor, GroupScanner, @unchecked S
             plan.append((item, expansion.targets))
         }
 
+        // Rows of apps Clean asked to quit: check again right before removing anything,
+        // in case an app reopened while the rows were being listed.
+        if plan.contains(where: { $0.row.metadata[CleanupMetadataKey.quitToClean] == "1" }) {
+            var latest = context
+            latest.runningBundleIDs = await CleanupSystemProbe.runningBundleIDs()
+            let recheck = CleanupScanner(context: latest, settings: settings)
+            plan.removeAll { entry in
+                guard entry.row.metadata[CleanupMetadataKey.quitToClean] == "1",
+                      let reason = recheck.blockingReason(for: entry.row) else { return false }
+                failures.append(ItemFailure(itemID: entry.row.id, title: entry.row.title, reason: reason))
+                return true
+            }
+        }
+
         // Regenerable folders declared by the catalog become permanent-removal zones for
         // this run only, after re-validating that each belongs to its rule.
         var zones = Set<String>()

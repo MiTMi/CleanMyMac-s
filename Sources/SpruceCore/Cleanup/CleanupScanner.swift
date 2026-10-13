@@ -209,9 +209,9 @@ public struct CleanupScanner: Sendable {
                 let relation = territoryRelation(candidate, before: index)
                 if relation == .inside { continue }
                 let owner = ownerHint(path: candidate, rule: rule, pattern: pattern)
-                // Nothing of an open app is removed before it quits, so its content counts
-                // however recently it was written (see `RunningPolicy.quitFirst`).
-                let ignoreAge = rule.whileRunning == .quitFirst && gateBlocker(rule: rule, owner: owner) != nil
+                // Nothing of an open app is removed before it quits, so its recent content
+                // counts too, down to `quitFirstFloor` (see `RunningPolicy.quitFirst`).
+                let ageLimit = quitsOwnerFirst(rule: rule, owner: owner) ? quitFirstAgeLimit(rule) : nil
                 var target = rule.target
                 if (target == .contents || target == .files) && !entry.isDirectory { target = .each }
                 switch target {
@@ -219,13 +219,13 @@ public struct CleanupScanner: Sendable {
                     if relation == .contains || containsProtected(candidate) { continue }
                     let title = rowTitle(rule: rule, pattern: pattern, path: candidate, entry: entry, owner: owner)
                     if let item = eachRow(rule, path: candidate, entry: entry, owner: owner, title: title,
-                                          ignoreAge: ignoreAge) {
+                                          ageLimit: ageLimit) {
                         result.items.append(item)
                     }
                 case .contents, .files:
                     let title = rowTitle(rule: rule, pattern: pattern, path: candidate, entry: entry, owner: owner)
                     if let item = folderRow(rule, index: index, path: candidate, entry: entry, owner: owner,
-                                            title: title, mode: target, ignoreAge: ignoreAge) {
+                                            title: title, mode: target, ageLimit: ageLimit) {
                         result.items.append(item)
                     }
                 case .findFiles:
@@ -249,7 +249,7 @@ public struct CleanupScanner: Sendable {
 
     /// A row removed as a whole (file, bundle or folder).
     func eachRow(_ rule: CleanupRule, path: String, entry: FileEntry, owner: String?, title: String,
-                 ignoreAge: Bool = false) -> ScanItem? {
+                 ageLimit: TimeInterval? = nil) -> ScanItem? {
         let name = entry.name
         if !rule.namePatterns.isEmpty && !CleanupPaths.matchesAny(name, rule.namePatterns) { return nil }
         if CleanupPaths.matchesAny(name, rule.excludedNames) { return nil }
@@ -270,7 +270,7 @@ public struct CleanupScanner: Sendable {
             draft = d
         default:
             let usage = measure(path, entry: entry, budget: rule.measureBudget)
-            if !ignoreAge && isRecent(newest: usage.newest, newestAccess: usage.newestAccess, rule: rule) { return nil }
+            if isRecent(newest: usage.newest, newestAccess: usage.newestAccess, rule: rule, limit: ageLimit) { return nil }
             if usage.bytes <= 0 && rule.category != .trashBins { return nil }
             draft = CleanupRowDraft(
                 path: path, entry: entry, title: title,
@@ -293,12 +293,12 @@ public struct CleanupScanner: Sendable {
 
     /// A folder whose children (contents) or files (files) are removed; the folder stays.
     func folderRow(_ rule: CleanupRule, index: Int, path: String, entry: FileEntry, owner: String?, title: String,
-                   mode: CleanupRule.Target, ignoreAge: Bool = false) -> ScanItem? {
+                   mode: CleanupRule.Target, ageLimit: TimeInterval? = nil) -> ScanItem? {
         guard entry.isDirectory else { return nil }
         if !rule.needsAdmin && !FileManager.default.isWritableFile(atPath: path) { return nil }
         let children = mode == .files
-            ? fileChildren(rule, index: index, folder: path, ignoreAge: ignoreAge)
-            : contentsChildren(rule, index: index, folder: path, ignoreAge: ignoreAge)
+            ? fileChildren(rule, index: index, folder: path, ageLimit: ageLimit)
+            : contentsChildren(rule, index: index, folder: path, ageLimit: ageLimit)
         guard !children.isEmpty else { return nil }
         let bytes = children.reduce(Int64(0)) { $0 + $1.bytes }
         guard bytes > 0 else { return nil }
@@ -358,7 +358,7 @@ public struct CleanupScanner: Sendable {
         }
         if let blocker = gateBlocker(rule: rule, owner: owner) {
             d.metadata[CleanupMetadataKey.inUse] = "1"
-            if rule.whileRunning == .quitFirst {
+            if quitsOwnerFirst(rule: rule, owner: owner) {
                 // Stays selected; Clean / Run asks to quit the app first.
                 d.metadata[CleanupMetadataKey.quitToClean] = "1"
                 d.note = "\(blocker). Spruce asks you to quit it before cleaning. " + d.note
@@ -404,7 +404,8 @@ public struct CleanupScanner: Sendable {
 
     /// Direct children of a folder that may be removed: not protected, ignored or claimed,
     /// old enough, and kept together with their SQLite family.
-    func contentsChildren(_ rule: CleanupRule, index: Int, folder: String, ignoreAge: Bool = false) -> [CleanupChild] {
+    func contentsChildren(_ rule: CleanupRule, index: Int, folder: String,
+                          ageLimit: TimeInterval? = nil) -> [CleanupChild] {
         guard let names = CleanupPaths.list(folder) else { return [] }
         struct Candidate {
             var name: String
@@ -426,7 +427,7 @@ public struct CleanupScanner: Sendable {
                 child.bytes = usage.bytes
                 child.files = usage.files
                 child.newest = usage.newest
-                if !ignoreAge && isRecent(newest: usage.newest, newestAccess: usage.newestAccess, rule: rule) {
+                if isRecent(newest: usage.newest, newestAccess: usage.newestAccess, rule: rule, limit: ageLimit) {
                     eligible = false
                 }
             }
@@ -443,7 +444,8 @@ public struct CleanupScanner: Sendable {
     }
 
     /// Regular files anywhere below a folder that may be removed (folders stay).
-    func fileChildren(_ rule: CleanupRule, index: Int, folder: String, ignoreAge: Bool = false) -> [CleanupChild] {
+    func fileChildren(_ rule: CleanupRule, index: Int, folder: String,
+                      ageLimit: TimeInterval? = nil) -> [CleanupChild] {
         struct Candidate {
             var child: CleanupChild
             var eligible: Bool
@@ -471,7 +473,7 @@ public struct CleanupScanner: Sendable {
                 return .continue
             }
             if checkIgnored && settings.isIgnored(path: e.path) { return .continue }
-            let eligible = ignoreAge || !isRecent(newest: e.modified, newestAccess: e.accessed, rule: rule)
+            let eligible = !isRecent(newest: e.modified, newestAccess: e.accessed, rule: rule, limit: ageLimit)
             candidates.append(Candidate(child: CleanupChild(path: e.path, entry: e, bytes: e.allocatedSize, files: 1,
                                                             newest: e.modified),
                                         eligible: eligible))
@@ -510,13 +512,14 @@ public struct CleanupScanner: Sendable {
             return CleanupExpansion(failure: "Changed since the scan; skipped")
         }
         if isBlocked(path) { return CleanupExpansion(failure: "Protected location") }
-        // Counted while its app was open (age ignored); the app has quit since, so what
-        // it wrote last is no longer in use.
-        let ignoreAge = rule.whileRunning == .quitFirst && item.metadata[CleanupMetadataKey.quitToClean] == "1"
+        // Counted while its app was open; the app has quit since, so content older than
+        // `quitFirstFloor` is no longer in use.
+        let quitFirst = rule.whileRunning == .quitFirst && item.metadata[CleanupMetadataKey.quitToClean] == "1"
             && gateBlocker(rule: rule, owner: item.metadata[CleanupMetadataKey.owner]) == nil
+        let ageLimit = quitFirst ? quitFirstAgeLimit(rule) : nil
         let children = mode == "files"
-            ? fileChildren(rule, index: index, folder: path, ignoreAge: ignoreAge)
-            : contentsChildren(rule, index: index, folder: path, ignoreAge: ignoreAge)
+            ? fileChildren(rule, index: index, folder: path, ageLimit: ageLimit)
+            : contentsChildren(rule, index: index, folder: path, ageLimit: ageLimit)
         let targets = children.map { child -> ScanItem in
             var meta: [String: String] = [
                 CleanupMetadataKey.inode: String(child.entry.inode),
@@ -545,6 +548,27 @@ public struct CleanupScanner: Sendable {
     }
 
     // MARK: Gates
+
+    /// For rows of an open app under `RunningPolicy.quitFirst`, the age limit while the
+    /// app is open and when cleaning after it quit: content written this recently stays,
+    /// as the app's extensions and helpers (which the running-app check can't see) may
+    /// still be writing it.
+    public static let quitFirstFloor: TimeInterval = 5 * 60
+
+    /// Whether `rule` quits `owner`'s app before cleaning: an app holding the row is open,
+    /// and every open app holding it can be quit from the sheet (not background-only).
+    func quitsOwnerFirst(rule: CleanupRule, owner: String?) -> Bool {
+        guard rule.whileRunning == .quitFirst, let owner else { return false }
+        let holders = context.runningBundleIDs.filter { CleanupOwnership.matches(owner: owner, bundleID: $0) }
+        guard !holders.isEmpty else { return false }
+        let quittable = context.quittableBundleIDs ?? context.runningBundleIDs
+        return holders.allSatisfy { quittable.contains($0) }
+    }
+
+    /// The age limit for a quit-first row (see `quitFirstFloor`).
+    func quitFirstAgeLimit(_ rule: CleanupRule) -> TimeInterval {
+        min(rule.minAge, Self.quitFirstFloor)
+    }
 
     var xcodeIsBusy: Bool {
         if context.runningBundleIDs.contains("com.apple.dt.Xcode") { return true }
@@ -637,6 +661,15 @@ public struct CleanupScanner: Sendable {
         for component in lower {
             for name in protectedNames where CleanupPaths.matchComponent(component, name) { return true }
         }
+        // Group containers carry a team ID or "group." in front of the app's bundle ID
+        // ("ABCDE12345.com.crowdstrike.falcon"), so match their owner too.
+        let original = CleanupPaths.components(path)
+        if original.count == lower.count {
+            for index in lower.indices.dropFirst() where lower[index - 1] == "group containers" {
+                guard let owner = CleanupOwnership.owner(forGroupContainer: original[index])?.lowercased() else { continue }
+                if protectedNames.contains(where: { CleanupPaths.matchComponent(owner, $0) }) { return true }
+            }
+        }
         return false
     }
 
@@ -687,10 +720,12 @@ public struct CleanupScanner: Sendable {
         return Usage(bytes: entry.allocatedSize, files: 1, newest: entry.modified, newestAccess: entry.accessed)
     }
 
-    func isRecent(newest: Date, newestAccess: Date, rule: CleanupRule) -> Bool {
-        guard rule.minAge > 0 else { return false }
+    /// Whether content is newer than the rule's `minAge` (or `limit`, when given).
+    func isRecent(newest: Date, newestAccess: Date, rule: CleanupRule, limit: TimeInterval? = nil) -> Bool {
+        let minAge = limit ?? rule.minAge
+        guard minAge > 0 else { return false }
         let reference = rule.ageBasis == .modification ? newest : max(newest, newestAccess)
-        return reference > context.now.addingTimeInterval(-rule.minAge)
+        return reference > context.now.addingTimeInterval(-minAge)
     }
 
     func isParentWritable(_ path: String) -> Bool {

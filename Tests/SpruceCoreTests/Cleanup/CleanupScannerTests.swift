@@ -500,29 +500,61 @@ final class CleanupScannerTests: XCTestCase {
         XCTAssertTrue(report.groups.allItems.allSatisfy(\.isSelected))
     }
 
-    func testOpenAppCacheCountsRecentContentAndCleansItOnlyOnceTheAppQuit() throws {
+    func testOpenAppCacheCountsRecentContentDownToTheFloorAndCleansItOnlyOnceTheAppQuit() throws {
         fx.file("Library/Caches/com.busy.app/old.bin", bytes: 10_000, age: 2 * day)
-        fx.file("Library/Caches/com.busy.app/live.bin", bytes: 20_000, age: 60)
+        fx.file("Library/Caches/com.busy.app/warm.bin", bytes: 20_000, age: 20 * 60)
+        fx.file("Library/Caches/com.busy.app/live.bin", bytes: 30_000, age: 60)
 
         // Closed: content written in the last hour is neither counted nor removed.
         let (_, closed) = fx.scan(fx.context(), sections: [.systemJunk])
         let idle = try XCTUnwrap(closed.item(endingWith: "com.busy.app"))
         XCTAssertNil(idle.metadata[CleanupMetadataKey.quitToClean])
 
-        // Open: everything counts, since nothing goes before the app quits.
+        // Open: the age limit shrinks to a few minutes, since nothing goes before the app quits.
         let (busyScanner, open) = fx.scan(fx.context(running: ["com.busy.app"]), sections: [.systemJunk])
         let item = try XCTUnwrap(open.item(endingWith: "com.busy.app"))
         XCTAssertGreaterThan(item.size, idle.size)
         XCTAssertNotNil(busyScanner.blockingReason(for: item), "never removed while the app is open")
 
-        // After the app quit, cleaning takes the recent file too.
+        // After the app quit, cleaning takes the warm file, but not what was written in
+        // the last few minutes (a helper may still be writing it).
         let (quitScanner, _) = fx.scan(fx.context(), sections: [.systemJunk])
         XCTAssertNil(quitScanner.blockingReason(for: item))
         let names = Set(quitScanner.expand(item).targets.compactMap { $0.url?.lastPathComponent })
-        XCTAssertEqual(names, ["old.bin", "live.bin"])
-        // A row scanned while the app was closed keeps the age limit.
+        XCTAssertEqual(names, ["old.bin", "warm.bin"])
+        // A row scanned while the app was closed keeps the full age limit.
         let idleNames = quitScanner.expand(idle).targets.compactMap { $0.url?.lastPathComponent }
         XCTAssertEqual(idleNames, ["old.bin"])
+    }
+
+    func testCacheHeldOnlyByABackgroundHelperStaysUnchecked() throws {
+        // A background-only process can't be quit from the sheet, so its app's cache is
+        // left alone (the old behaviour) instead of being selected and never cleaned.
+        fx.file("Library/Caches/com.example.app/cache.bin", age: 2 * day)
+        let context = fx.context(running: ["com.example.app.agent"], quittable: [])
+        let (scanner, report) = fx.scan(context, sections: [.systemJunk])
+        let item = try XCTUnwrap(report.item(endingWith: "com.example.app"))
+        XCTAssertFalse(item.isSelected)
+        XCTAssertEqual(item.metadata[CleanupMetadataKey.inUse], "1")
+        XCTAssertNil(item.metadata[CleanupMetadataKey.quitToClean])
+        XCTAssertNotNil(scanner.blockingReason(for: item))
+        let (_, checkup) = fx.scan(fx.context(running: ["com.example.app.agent"], quittable: [], purpose: .checkup),
+                                   sections: [.systemJunk])
+        XCTAssertNil(checkup.item(endingWith: "com.example.app"))
+    }
+
+    func testGroupContainerCachesOfOpenAppsStayUncheckedAndProtectedVendorsAreNeverOffered() throws {
+        let groups = "Library/Group Containers/"
+        fx.file(groups + "ABCDE12345.com.example.app/Library/Caches/blob.bin", age: 2 * day)
+        fx.file(groups + "ABCDE12345.com.crowdstrike.falcon/Library/Caches/blob.bin", age: 2 * day)
+        fx.file(groups + "group.com.nordvpn.macos/Library/Caches/blob.bin", age: 2 * day)
+        let (_, report) = fx.scan(fx.context(running: ["com.example.app"]), sections: [.systemJunk])
+        let item = try XCTUnwrap(report.item(endingWith: "ABCDE12345.com.example.app/Library/Caches"))
+        // Extensions sharing the container can't be seen by the running-app check.
+        XCTAssertFalse(item.isSelected)
+        XCTAssertNil(item.metadata[CleanupMetadataKey.quitToClean])
+        XCTAssertNil(report.item(endingWith: "com.crowdstrike.falcon/Library/Caches"))
+        XCTAssertNil(report.item(endingWith: "group.com.nordvpn.macos/Library/Caches"))
     }
 
     func testOldLogsOfOpenAppsAreSelectedWithoutQuittingThem() throws {

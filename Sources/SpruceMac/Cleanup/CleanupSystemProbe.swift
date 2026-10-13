@@ -10,6 +10,7 @@ enum CleanupSystemProbe {
 
     static func makeContext(purpose: CleanupScanPurpose, includeMailAccounts: Bool = true) async -> CleanupContext {
         let running = await runningBundleIDs()
+        let quittable = await quittableBundleIDs()
         let processes = await runningProcessNames()
         let fullDiskAccess = Permissions.hasFullDiskAccess
         let home = NSHomeDirectory()
@@ -28,6 +29,7 @@ enum CleanupSystemProbe {
             startupVolumeName: startupVolumeName(),
             externalVolumes: externalVolumes(),
             runningBundleIDs: running,
+            quittableBundleIDs: quittable,
             runningProcessNames: processes,
             hasFullDiskAccess: fullDiskAccess,
             ownBundleID: Bundle.main.bundleIdentifier,
@@ -43,6 +45,17 @@ enum CleanupSystemProbe {
     static func runningBundleIDs() async -> Set<String> {
         await MainActor.run {
             Set(NSWorkspace.shared.runningApplications.compactMap(\.bundleIdentifier))
+        }
+    }
+
+    /// Running apps a quit sheet can show and quit: not background-only, and not Spruce.
+    /// (The same filter as Checkup's quit sheet.)
+    static func quittableBundleIDs() async -> Set<String> {
+        await MainActor.run {
+            let ownPID = ProcessInfo.processInfo.processIdentifier
+            return Set(NSWorkspace.shared.runningApplications.filter {
+                !$0.isTerminated && $0.activationPolicy != .prohibited && $0.processIdentifier != ownPID
+            }.compactMap(\.bundleIdentifier))
         }
     }
 

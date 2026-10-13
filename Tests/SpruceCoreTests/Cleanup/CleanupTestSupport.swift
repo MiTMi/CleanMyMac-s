@@ -68,6 +68,7 @@ final class CleanupFixture {
 
     func context(
         running: Set<String> = [],
+        quittable: Set<String>? = nil,
         processes: Set<String> = [],
         fullDiskAccess: Bool = true,
         purpose: CleanupScanPurpose = .module,
@@ -78,7 +79,7 @@ final class CleanupFixture {
         CleanupContext(
             home: home, systemRoot: system, uid: CleanupContext.currentUID, userTempDir: tempDir,
             userCacheDir: nil, startupVolumeName: "Test HD", externalVolumes: volumes,
-            runningBundleIDs: running, runningProcessNames: processes, hasFullDiskAccess: fullDiskAccess,
+            runningBundleIDs: running, quittableBundleIDs: quittable, runningProcessNames: processes, hasFullDiskAccess: fullDiskAccess,
             ownBundleID: "com.spruce.test", mailAccounts: mailAccounts, now: Date(), purpose: purpose,
             documentRevisionsPaths: ["/.DocumentRevisions-V100"], deletedUsersPath: "/Users/Deleted Users"
         )
